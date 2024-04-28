@@ -33,11 +33,13 @@ where
     }
 }
 
+#[derive(Debug)]
 struct DataPtr {
     offset: u64,
     length: usize,
 }
 
+#[derive(Debug)]
 struct RawBox {
     box_type: String,
     data_ptr: DataPtr,
@@ -89,6 +91,7 @@ impl RawBox {
     }
 }
 
+#[derive(Debug)]
 struct FullBox {
     ftyp: FileTypeBox,    // ftyp
     meta: MetaBox,        // meta
@@ -147,6 +150,7 @@ impl FullBox {
     }
 }
 
+#[derive(Debug)]
 struct FileTypeBox {
     major_brand: u32,
     minor_version: u32,
@@ -163,6 +167,7 @@ impl FileTypeBox {
     }
 }
 
+#[derive(Debug)]
 struct MetaBox {
     boxes: HashMap<String, RawBox>,
     info_items: HashMap<String, InfoItemBox>,
@@ -178,6 +183,7 @@ impl MetaBox {
     }
 }
 
+#[derive(Debug)]
 struct InfoItemBox {
     item_id: u32,
     item_type: String,
@@ -221,3 +227,24 @@ struct InfoItemBox {
 
 //     data_ptr: &'a [u8],
 // }
+
+#[cfg(test)]
+mod tests {
+    use tokio::fs;
+
+    use crate::heic::FullBox;
+
+    #[tokio::test]
+    async fn read_full_box() {
+        // open file
+        let mut f = fs::File::open("../B0001612.HEIC")
+            .await
+            .expect("Failed to open file");
+
+        let full_box = FullBox::from_reader(&mut f)
+            .await
+            .expect("failed to read full box");
+
+        println!("{:#?}", full_box);
+    }
+}

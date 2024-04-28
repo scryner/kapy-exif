@@ -1,4 +1,7 @@
-use std::{collections::HashMap, io::ErrorKind};
+use std::{
+    collections::HashMap,
+    io::{ErrorKind, SeekFrom},
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -33,16 +36,33 @@ where
     }
 }
 
-#[derive(Debug)]
-struct DataPtr {
+#[derive(Clone, Debug)]
+struct Ptr {
     offset: u64,
     length: usize,
+}
+
+impl Ptr {
+    async fn read_data<R>(&self, r: &mut R) -> Result<Vec<u8>>
+    where
+        R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
+    {
+        // seek to offset
+        r.seek(SeekFrom::Start(self.offset)).await?;
+
+        // read data
+        let mut buf = vec![0u8; self.length];
+        r.read_exact(&mut buf).await?;
+
+        Ok(buf)
+    }
 }
 
 #[derive(Debug)]
 struct RawBox {
     box_type: String,
-    data_ptr: DataPtr,
+    full_ptr: Ptr,
+    data_ptr: Ptr,
 }
 
 impl RawBox {
@@ -69,7 +89,7 @@ impl RawBox {
             }
 
             // convert to u32 in big endian
-            u32::from_be_bytes(buf)
+            u32::from_be_bytes(buf) as usize
         };
 
         // read next 4 bytes from reader to get box type
@@ -81,13 +101,52 @@ impl RawBox {
             String::from_utf8(buf.to_vec())?
         };
 
+        let (full_ptr, data_ptr) = match length {
+            1 => {
+                let mut buf = [0u8; 8];
+                r.read_exact(&mut buf).await?;
+
+                // convert to u64 in big endian
+                let length = u64::from_be_bytes(buf) as usize;
+
+                let full_ptr = Ptr { offset, length };
+
+                let data_ptr = Ptr {
+                    offset: offset + 16,
+                    length: length - 16,
+                };
+
+                (full_ptr, data_ptr)
+            }
+            _ => {
+                let full_ptr = Ptr { offset, length };
+
+                let data_ptr = Ptr {
+                    offset: offset + 8,
+                    length: length - 8,
+                };
+
+                (full_ptr, data_ptr)
+            }
+        };
+
         Ok(Some(Self {
             box_type,
-            data_ptr: DataPtr {
-                offset,
-                length: length as usize,
-            },
+            full_ptr,
+            data_ptr,
         }))
+    }
+
+    async fn advance<R>(&self, r: &mut R) -> Result<()>
+    where
+        R: AsyncSeek + Send + Sync + Unpin,
+    {
+        let next_offset = self.full_ptr.offset + self.full_ptr.length as u64;
+
+        // seek
+        r.seek(SeekFrom::Start(next_offset)).await?;
+
+        Ok(())
     }
 }
 
@@ -117,6 +176,7 @@ impl FullBox {
             };
 
             let box_type = raw_box.box_type.as_str();
+            println!("--> {} / {:?}", box_type, raw_box);
 
             match box_type {
                 "ftyp" => {
@@ -128,9 +188,11 @@ impl FullBox {
                     meta = Some(meta_box);
                 }
                 "free" => {
+                    raw_box.advance(r).await?;
                     free = Some(raw_box);
                 }
                 "mdat" => {
+                    raw_box.advance(r).await?;
                     media = Some(raw_box);
                 }
                 _ => return Err(anyhow::anyhow!("Unknown box type: {}", box_type)),
@@ -152,10 +214,10 @@ impl FullBox {
 
 #[derive(Debug)]
 struct FileTypeBox {
-    major_brand: u32,
+    major_brand: String,
     minor_version: u32,
-    compatible_brands: Vec<u32>,
-    data_ptr: DataPtr,
+    compatible_brands: Vec<String>,
+    data_ptr: Ptr,
 }
 
 impl FileTypeBox {
@@ -163,15 +225,50 @@ impl FileTypeBox {
     where
         R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
     {
-        todo!()
+        let data = raw_box.data_ptr.read_data(r).await?;
+
+        // check format
+        if data.len() < 8 {
+            return Err(anyhow::anyhow!("Invalid data length: less than 8 bytes"));
+        }
+
+        if data.len() % 4 != 0 {
+            return Err(anyhow::anyhow!(
+                "Invalid data length: not multiple of 4 bytes"
+            ));
+        }
+
+        // read major brand
+        let major_brand = &data[0..4];
+        let major_brand = String::from_utf8_lossy(major_brand).to_string();
+
+        // read minor brand
+        let minor_brand = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+
+        // read compatible brands
+        let mut compatible_brands = Vec::new();
+        for i in (8..data.len()).step_by(4) {
+            let brand = &data[i..i + 4];
+            let brand = String::from_utf8_lossy(brand).to_string();
+
+            compatible_brands.push(brand);
+        }
+
+        Ok(Self {
+            major_brand,
+            minor_version: minor_brand,
+            compatible_brands,
+            data_ptr: raw_box.data_ptr.clone(),
+        })
     }
 }
 
 #[derive(Debug)]
 struct MetaBox {
+    version: u32,
     boxes: HashMap<String, RawBox>,
-    info_items: HashMap<String, InfoItemBox>,
-    data_ptr: DataPtr,
+    // info_items: HashMap<String, InfoItemBox>,
+    data_ptr: Ptr,
 }
 
 impl MetaBox {
@@ -179,7 +276,38 @@ impl MetaBox {
     where
         R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
     {
-        todo!()
+        let data = raw_box.data_ptr.read_data(r).await?;
+
+        // read version
+        let version = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        let offset = raw_box.data_ptr.offset + 4;
+
+        // read children boxes
+        let mut cursor = std::io::Cursor::new(&data[4..]);
+
+        let mut boxes = HashMap::new();
+        loop {
+            let mut raw_box = match RawBox::from_reader(&mut cursor).await? {
+                Some(b) => b,
+                None => break,
+            };
+
+            // advance
+            raw_box.advance(&mut cursor).await?;
+            let pos = cursor.seek(SeekFrom::Current(0)).await?;
+
+            // adjust offset
+            raw_box.full_ptr.offset += offset;
+            raw_box.data_ptr.offset += offset;
+
+            boxes.insert(raw_box.box_type.clone(), raw_box);
+        }
+
+        Ok(Self {
+            version,
+            boxes,
+            data_ptr: raw_box.data_ptr.clone(),
+        })
     }
 }
 
@@ -188,45 +316,8 @@ struct InfoItemBox {
     item_id: u32,
     item_type: String,
     version: u32,
-    data_ptr: DataPtr,
+    data_ptr: Ptr,
 }
-
-// struct MetaBox<'a> {
-//     handler: HandlerBox<'a>,            // hdlr
-//     primary_item: RawBox<'a>,           // pitm: ignore details
-//     data_information: RawBox<'a>,       // dinf: ignore details
-//     item_location: ItemLocationBox<'a>, // iloc
-//     item_protection: RawBox<'a>,        // iprp: ignore details
-//     item_info: ItemInfoBox<'a>,         // iinf
-//     ipmp_control: RawBox<'a>,           // ipmc: ignore details
-//     item_reference: RawBox<'a>,         // iref: ignore details
-//     item_data: RawBox<'a>,              // idat: ignore details
-// }
-
-// struct HandlerBox<'a> {
-//     pre_defined: u32,
-//     handler_type: u32,
-//     reserved: [u32; 3],
-//     name: String,
-//     data_ptr: &'a [u8],
-// }
-
-// struct ItemLocationBox<'a> {
-//     // iloc
-//     data_ptr: &'a [u8],
-// }
-
-// struct ItemInfoBox<'a> {
-//     // iinf
-//     entry_count: u32,
-
-//     data_ptr: &'a [u8],
-// }
-
-// struct  ItemInfoEntry<'a> {
-
-//     data_ptr: &'a [u8],
-// }
 
 #[cfg(test)]
 mod tests {
@@ -237,7 +328,7 @@ mod tests {
     #[tokio::test]
     async fn read_full_box() {
         // open file
-        let mut f = fs::File::open("../B0001612.HEIC")
+        let mut f = fs::File::open("B0001612.HEIC")
             .await
             .expect("Failed to open file");
 

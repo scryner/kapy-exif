@@ -3,7 +3,7 @@ use std::{
     io::{ErrorKind, SeekFrom},
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
@@ -265,9 +265,11 @@ impl FileTypeBox {
 
 #[derive(Debug)]
 struct MetaBox {
-    version: u32,
+    version: u8,
+    flags: u32,
     boxes: HashMap<String, RawBox>,
     // info_items: HashMap<String, InfoItemBox>,
+    full_ptr: Ptr,
     data_ptr: Ptr,
 }
 
@@ -279,11 +281,16 @@ impl MetaBox {
         let data = raw_box.data_ptr.read_data(r).await?;
 
         // read version
-        let version = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        let (version, flags) = get_version_and_flags(&data)?;
+
+        // get offset
         let offset = raw_box.data_ptr.offset + 4;
 
         // read children boxes
         let mut cursor = std::io::Cursor::new(&data[4..]);
+
+        let mut iinf_box: Option<ItemInfoBox> = None;
+        let mut iloc_box: Option<ItemLocationBox> = None;
 
         let mut boxes = HashMap::new();
         loop {
@@ -292,9 +299,20 @@ impl MetaBox {
                 None => break,
             };
 
-            // advance
-            raw_box.advance(&mut cursor).await?;
-            let pos = cursor.seek(SeekFrom::Current(0)).await?;
+            match raw_box.box_type.as_str() {
+                "iinf" => {
+                    let iinf = ItemInfoBox::from_raw_box(&raw_box, &mut cursor).await?;
+                    iinf_box = Some(iinf);
+                }
+                // "iloc" => {
+                //     let iloc = ItemLocationBox::from_raw_box(&raw_box, &mut cursor).await?;
+                //     iloc_box = Some(iloc);
+                // }
+                _ => {
+                    // advance
+                    raw_box.advance(&mut cursor).await?;
+                }
+            }
 
             // adjust offset
             raw_box.full_ptr.offset += offset;
@@ -303,21 +321,168 @@ impl MetaBox {
             boxes.insert(raw_box.box_type.clone(), raw_box);
         }
 
+        // check required boxes
+        // if iinf_box.is_none() || iloc_box.is_none() {
+        //     return Err(anyhow!("Missing required boxes"));
+        // }
+
+        // make item info entry boxes
+
         Ok(Self {
             version,
+            flags,
             boxes,
+            full_ptr: raw_box.full_ptr.clone(),
+            data_ptr: raw_box.data_ptr.clone(),
+        })
+    }
+}
+
+fn get_version_and_flags(data: &[u8]) -> Result<(u8, u32)> {
+    if data.len() < 4 {
+        return Err(anyhow!("Invalid data length: less than 4 bytes"));
+    }
+
+    let version = data[0];
+    let flags = u32::from_be_bytes([0, data[1], data[2], data[3]]);
+
+    Ok((version, flags))
+}
+
+#[derive(Debug)]
+struct ItemInfoBox {
+    version: u8,
+    flags: u32,
+
+    counts: u16,
+    entries: Vec<ItemInfoEntryBox>,
+
+    full_ptr: Ptr,
+    data_ptr: Ptr,
+}
+
+impl ItemInfoBox {
+    async fn from_raw_box<R>(raw_box: &RawBox, r: &mut R) -> Result<Self>
+    where
+        R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
+    {
+        let data = raw_box.data_ptr.read_data(r).await?;
+
+        // check data length
+        if data.len() < 6 {
+            return Err(anyhow!("Invalid data length: less than 6 bytes"));
+        }
+
+        // read version and flags
+        let (version, flags) = get_version_and_flags(&data)?;
+
+        // read counts
+        let counts: u16 = u16::from_be_bytes([data[4], data[5]]);
+
+        // read entries
+        let mut cursor = std::io::Cursor::new(&data[6..]);
+        let mut entries = Vec::new();
+
+        for _ in 0..counts {
+            // make raw box
+            let item_raw_box = RawBox::from_reader(&mut cursor)
+                .await?
+                .ok_or(anyhow!("EOF: must be existed"))?;
+
+            let entry = ItemInfoEntryBox::from_raw_box(&item_raw_box, &mut cursor).await?;
+            entries.push(entry);
+        }
+
+        Ok(Self {
+            version,
+            flags,
+            counts,
+            entries,
+            full_ptr: raw_box.full_ptr.clone(),
             data_ptr: raw_box.data_ptr.clone(),
         })
     }
 }
 
 #[derive(Debug)]
-struct InfoItemBox {
-    item_id: u32,
+struct ItemInfoEntryBox {
+    version: u8,
+    flags: u32,
+
+    item_id: u16,
+    protection_index: u16,
+
     item_type: String,
-    version: u32,
+}
+
+impl ItemInfoEntryBox {
+    async fn from_raw_box<R>(raw_box: &RawBox, r: &mut R) -> Result<Self>
+    where
+        R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
+    {
+        let data = raw_box.data_ptr.read_data(r).await?;
+        if data.len() != 13 {
+            return Err(anyhow!(
+                "Invalid data length: must be 13 bytes (actual: {})",
+                data.len()
+            ));
+        }
+
+        // read version and flags
+        let (version, flags) = get_version_and_flags(&data)?;
+
+        // check version
+        if version != 2 {
+            return Err(anyhow!(
+                "Invalid version: {} (only version 2 was supported)",
+                version
+            ));
+        }
+
+        // read item id
+        let item_id = u16::from_be_bytes([data[4], data[5]]);
+
+        // read protection index
+        let protection_index = u16::from_be_bytes([data[6], data[7]]);
+
+        // read item type
+        let item_type = String::from_utf8_lossy(&data[8..12]).to_string();
+
+        Ok(Self {
+            version,
+            flags,
+            item_id,
+            protection_index,
+            item_type,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ItemLocationBox {
+    version: u8,
+    flags: u32,
+
+    full_ptr: Ptr,
     data_ptr: Ptr,
 }
+
+impl ItemLocationBox {
+    async fn from_raw_box<R>(raw_box: &RawBox, r: &mut R) -> Result<Self>
+    where
+        R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
+    {
+        todo!()
+    }
+}
+
+// #[derive(Debug)]
+// struct InfoItemBox {
+//     item_id: u32,
+//     item_type: String,
+//     version: u32,
+//     data_ptr: Ptr,
+// }
 
 #[cfg(test)]
 mod tests {

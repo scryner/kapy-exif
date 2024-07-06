@@ -359,7 +359,7 @@ struct ItemInfoBox {
     flags: u32,
 
     counts: u16,
-    entries: Vec<ItemInfoEntryBox>,
+    entries: Vec<ItemInfoEntry>,
 
     full_ptr: Ptr,
     data_ptr: Ptr,
@@ -393,7 +393,7 @@ impl ItemInfoBox {
                 .await?
                 .ok_or(anyhow!("EOF: must be existed"))?;
 
-            let entry = ItemInfoEntryBox::from_raw_box(&item_raw_box, &mut cursor).await?;
+            let entry = ItemInfoEntry::from_raw_box(&item_raw_box, &mut cursor).await?;
             debug!("item info entry: {:?}", entry);
 
             entries.push(entry);
@@ -411,7 +411,7 @@ impl ItemInfoBox {
 }
 
 #[derive(Debug)]
-struct ItemInfoEntryBox {
+struct ItemInfoEntry {
     version: u8,
     flags: u32,
 
@@ -421,15 +421,15 @@ struct ItemInfoEntryBox {
     item_type: String,
 }
 
-impl ItemInfoEntryBox {
+impl ItemInfoEntry {
     async fn from_raw_box<R>(raw_box: &RawBox, r: &mut R) -> Result<Self>
     where
         R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
     {
         let data = raw_box.data_ptr.read_data(r).await?;
-        if data.len() != 13 {
+        if data.len() < 13 {
             return Err(anyhow!(
-                "Invalid data length: must be 13 bytes (actual: {})",
+                "Invalid data length: must be greater than 13 bytes (actual: {})",
                 data.len()
             ));
         }
@@ -660,15 +660,20 @@ mod tests {
         // init logger
         init_logger();
 
-        // open file
-        let mut f = fs::File::open("B0001612.HEIC")
-            .await
-            .expect("Failed to open file");
+        // test files
+        let files = vec![
+            "sample/sample_by_iphone15-pro-max.heic",
+            "sample/sample_by_hasselblad-x2d.heic",
+        ];
 
-        let full_box = FullBox::from_reader(&mut f)
-            .await
-            .expect("failed to read full box");
+        for file in files.into_iter() {
+            let mut f = fs::File::open(file).await.expect("Failed to open file");
 
-        println!("{:#?}", full_box);
+            let full_box = FullBox::from_reader(&mut f)
+                .await
+                .expect("failed to read full box");
+
+            println!("--------{}\n{:#?}", file, full_box);
+        }
     }
 }

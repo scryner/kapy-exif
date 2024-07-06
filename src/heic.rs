@@ -1,10 +1,12 @@
 use std::{
     collections::HashMap,
-    io::{ErrorKind, SeekFrom},
+    io::{Cursor, ErrorKind, SeekFrom},
+    u8,
 };
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use log::debug;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
 use crate::ManipulateRawExif;
@@ -176,7 +178,7 @@ impl FullBox {
             };
 
             let box_type = raw_box.box_type.as_str();
-            println!("--> {} / {:?}", box_type, raw_box);
+            debug!("box entry: {} / {:?}", box_type, raw_box);
 
             match box_type {
                 "ftyp" => {
@@ -268,7 +270,7 @@ struct MetaBox {
     version: u8,
     flags: u32,
     boxes: HashMap<String, RawBox>,
-    // info_items: HashMap<String, InfoItemBox>,
+    info_items: HashMap<String, ItemInfoBox>,
     full_ptr: Ptr,
     data_ptr: Ptr,
 }
@@ -291,6 +293,7 @@ impl MetaBox {
 
         let mut iinf_box: Option<ItemInfoBox> = None;
         let mut iloc_box: Option<ItemLocationBox> = None;
+        let mut info_items = HashMap::new();
 
         let mut boxes = HashMap::new();
         loop {
@@ -304,10 +307,10 @@ impl MetaBox {
                     let iinf = ItemInfoBox::from_raw_box(&raw_box, &mut cursor).await?;
                     iinf_box = Some(iinf);
                 }
-                // "iloc" => {
-                //     let iloc = ItemLocationBox::from_raw_box(&raw_box, &mut cursor).await?;
-                //     iloc_box = Some(iloc);
-                // }
+                "iloc" => {
+                    let iloc = ItemLocationBox::from_raw_box(&raw_box, &mut cursor).await?;
+                    iloc_box = Some(iloc);
+                }
                 _ => {
                     // advance
                     raw_box.advance(&mut cursor).await?;
@@ -322,9 +325,9 @@ impl MetaBox {
         }
 
         // check required boxes
-        // if iinf_box.is_none() || iloc_box.is_none() {
-        //     return Err(anyhow!("Missing required boxes"));
-        // }
+        if iinf_box.is_none() || iloc_box.is_none() {
+            return Err(anyhow!("Missing required boxes"));
+        }
 
         // make item info entry boxes
 
@@ -334,6 +337,7 @@ impl MetaBox {
             boxes,
             full_ptr: raw_box.full_ptr.clone(),
             data_ptr: raw_box.data_ptr.clone(),
+            info_items,
         })
     }
 }
@@ -390,6 +394,8 @@ impl ItemInfoBox {
                 .ok_or(anyhow!("EOF: must be existed"))?;
 
             let entry = ItemInfoEntryBox::from_raw_box(&item_raw_box, &mut cursor).await?;
+            debug!("item info entry: {:?}", entry);
+
             entries.push(entry);
         }
 
@@ -463,8 +469,106 @@ struct ItemLocationBox {
     version: u8,
     flags: u32,
 
+    entries: HashMap<u32, ItemLocationEntry>,
+
     full_ptr: Ptr,
     data_ptr: Ptr,
+}
+
+#[derive(Debug)]
+struct ItemLocationEntry {
+    item_id: u32,
+    construction_method: u16,
+    data_reference_index: u16,
+    base_offset: u64,
+    extent_count: u16,
+    extents: Vec<ItemLocationExtent>,
+}
+
+impl ItemLocationEntry {
+    async fn from_cursor(
+        r: &mut Cursor<&[u8]>,
+        version: u8,
+        offset_size: u8,
+        length_size: u8,
+        base_offset_size: u8,
+        index_size: u8,
+    ) -> Result<Self> {
+        let item_id = match version {
+            1 => r.read_u16().await? as u32,
+            2 => r.read_u32().await?,
+            _ => return Err(anyhow!("Invalid version: {}", version)),
+        };
+
+        let construction_method = {
+            // read 4 bits (upper 12 bits are reserved)
+            r.read_u16().await? & 0x0F
+        };
+
+        let data_reference_index = r.read_u16().await?;
+
+        let base_offset = match base_offset_size {
+            // in byte size
+            0 => 0,
+            1 => r.read_u8().await? as u64,
+            2 => r.read_u16().await? as u64,
+            4 => r.read_u32().await? as u64,
+            8 => r.read_u64().await?,
+            _ => return Err(anyhow!("Invalid base offset size: {}", base_offset_size)),
+        };
+
+        let extent_count = r.read_u16().await?;
+        let mut extents = Vec::new();
+
+        for _ in 0..extent_count {
+            let extent_index = match index_size {
+                0 => 0,
+                1 => r.read_u8().await? as u64,
+                2 => r.read_u16().await? as u64,
+                4 => r.read_u32().await? as u64,
+                8 => r.read_u64().await?,
+                _ => return Err(anyhow!("Invalid index size: {}", index_size)),
+            };
+
+            let extent_offset = match offset_size {
+                1 => r.read_u8().await? as u64,
+                2 => r.read_u16().await? as u64,
+                4 => r.read_u32().await? as u64,
+                8 => r.read_u64().await?,
+                _ => return Err(anyhow!("Invalid offset size: {}", offset_size)),
+            };
+
+            let extent_length = match length_size {
+                1 => r.read_u8().await? as u64,
+                2 => r.read_u16().await? as u64,
+                4 => r.read_u32().await? as u64,
+                8 => r.read_u64().await?,
+                _ => return Err(anyhow!("Invalid length size: {}", length_size)),
+            };
+
+            extents.push(ItemLocationExtent {
+                extent_index,
+                extent_offset,
+                extent_length,
+            });
+        }
+
+        Ok(Self {
+            item_id,
+            construction_method,
+            data_reference_index,
+            base_offset,
+            extent_count,
+            extents,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ItemLocationExtent {
+    extent_index: u64,
+    extent_offset: u64,
+    extent_length: u64,
 }
 
 impl ItemLocationBox {
@@ -472,26 +576,90 @@ impl ItemLocationBox {
     where
         R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
     {
-        todo!()
+        debug!("parsing iloc from {}", r.stream_position().await?);
+
+        // read data
+        let data = raw_box.data_ptr.read_data(r).await?;
+        debug!("iloc data length: {}", data.len());
+        debug!("iloc data: {}", hex::encode(&data));
+
+        // read version and flags
+        let (version, flags) = get_version_and_flags(&data)?;
+
+        // make cursor
+        let mut cursor = Cursor::new(&data[4..]);
+
+        // read further 1 byte to indicate offset size and length size
+        let (offset_size, length_size) = {
+            let u8 = cursor.read_u8().await?;
+            (u8 >> 4, u8 & 0x0F)
+        };
+
+        // read base offset size and index size
+        let (base_offset_size, index_size) = {
+            let u8 = cursor.read_u8().await?;
+            (u8 >> 4, u8 & 0x0F)
+        };
+
+        // read count
+        let count = match version {
+            1 => cursor.read_u16().await? as usize,
+            2 => cursor.read_u32().await? as usize,
+            _ => return Err(anyhow!("Invalid version: {}", version)),
+        };
+
+        // make iloc entries
+        let mut entries = HashMap::new();
+
+        for _ in 0..count {
+            let entry = ItemLocationEntry::from_cursor(
+                &mut cursor,
+                version,
+                offset_size,
+                length_size,
+                base_offset_size,
+                index_size,
+            )
+            .await?;
+
+            debug!("iloc entry: {:?}", entry);
+
+            entries.insert(entry.item_id, entry);
+        }
+
+        Ok(Self {
+            version,
+            flags,
+            entries,
+            full_ptr: raw_box.full_ptr.clone(),
+            data_ptr: raw_box.data_ptr.clone(),
+        })
     }
 }
 
-// #[derive(Debug)]
-// struct InfoItemBox {
-//     item_id: u32,
-//     item_type: String,
-//     version: u32,
-//     data_ptr: Ptr,
-// }
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Once;
+
     use tokio::fs;
 
     use crate::heic::FullBox;
 
+    static INIT: Once = Once::new();
+
+    fn init_logger() {
+        INIT.call_once(|| {
+            env_logger::builder()
+                .filter_level(log::LevelFilter::Debug)
+                .init();
+        });
+    }
+
     #[tokio::test]
     async fn read_full_box() {
+        // init logger
+        init_logger();
+
         // open file
         let mut f = fs::File::open("B0001612.HEIC")
             .await

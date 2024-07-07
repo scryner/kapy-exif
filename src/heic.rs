@@ -1,40 +1,81 @@
 use std::{
     collections::HashMap,
     io::{Cursor, ErrorKind, SeekFrom},
+    path::Path,
+    sync::Arc,
     u8,
 };
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use log::debug;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
+use tokio::{
+    fs::File,
+    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt},
+    sync::Mutex,
+};
 
-use crate::ManipulateRawExif;
+use crate::ExtractRawExif;
 
-pub struct Heic<R> {
-    r: R,
+pub fn heic(path: impl AsRef<Path>) -> Result<impl ExtractRawExif> {
+    // open file
+    let file =
+        std::fs::File::open(path.as_ref()).map_err(|e| anyhow!("Failed to open file: {}", e))?;
+
+    Ok(Heic {
+        file: Arc::new(Mutex::new(File::from_std(file))),
+    })
 }
 
-impl<R> Heic<R>
-where
-    R: AsyncRead + AsyncSeek + Send + Sync,
-{
-    pub fn new(r: R) -> Self {
-        Self { r }
-    }
+struct Heic {
+    file: Arc<Mutex<File>>,
 }
 
 #[async_trait]
-impl<R> ManipulateRawExif for Heic<R>
-where
-    R: AsyncRead + AsyncSeek + Send + Sync,
-{
+impl ExtractRawExif for Heic {
     async fn extract(&self) -> Result<Vec<u8>> {
-        unimplemented!()
-    }
+        let mut guard = self.file.lock().await;
 
-    async fn replace(&mut self, data: &[u8]) -> Result<()> {
-        unimplemented!()
+        // read full box
+        let full_box = FullBox::from_reader(&mut *guard).await?;
+
+        // get offset and length of exif box
+        let exif_ptrs = full_box
+            .meta
+            .get_item_ptr("Exif")
+            .ok_or(anyhow!("Exif box not found"))?;
+
+        let exif_ptr = exif_ptrs.first().ok_or(anyhow!("Exif extent not found"))?;
+        debug!("exif ptr: {:?}", exif_ptr);
+
+        // check exif length to avoid OOM (maybe, due to malicious file or uncaught errors on parsing ISOBMFF format)
+        const MAX_LEN: usize = 1024 * 1024 * 8; // 8MB
+
+        if exif_ptr.length - 4 > MAX_LEN {
+            // I don't know why -4 is needed currently (it may be another header)
+            return Err(anyhow!("Exif length is too large: {}", exif_ptr.length - 4));
+        }
+
+        // seek to raw exif content
+        guard.seek(SeekFrom::Start(exif_ptr.offset + 4)).await?;
+
+        // extract exif data
+        let mut exif_data = vec![0u8; exif_ptr.length - 4];
+        guard.read_exact(&mut exif_data).await.map_err(|e| {
+            anyhow!(
+                "Failed to read exif (offset: {}, len: {}): {}",
+                exif_ptr.offset,
+                exif_ptr.length,
+                e.to_string()
+            )
+        })?;
+
+        // check exif data starts with "Exif"
+        if &exif_data[0..4] != b"Exif" {
+            return Err(anyhow!("Invalid exif data: not started with 'Exif'"));
+        }
+
+        Ok(exif_data)
     }
 }
 
@@ -152,12 +193,13 @@ impl RawBox {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct FullBox {
-    ftyp: FileTypeBox,    // ftyp
-    meta: MetaBox,        // meta
-    free: Option<RawBox>, // free
-    media: RawBox,        // mdat
+    pub(crate) ftyp: FileTypeBox,    // ftyp
+    pub(crate) meta: MetaBox,        // meta
+    pub(crate) free: Option<RawBox>, // free
+    pub(crate) media: RawBox,        // mdat
 }
 
 impl FullBox {
@@ -214,12 +256,14 @@ impl FullBox {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct FileTypeBox {
-    major_brand: String,
-    minor_version: u32,
-    compatible_brands: Vec<String>,
-    data_ptr: Ptr,
+    pub(crate) major_brand: String,
+    pub(crate) minor_version: u32,
+    pub(crate) compatible_brands: Vec<String>,
+
+    pub(crate) data_ptr: Ptr,
 }
 
 impl FileTypeBox {
@@ -265,14 +309,18 @@ impl FileTypeBox {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct MetaBox {
-    version: u8,
-    flags: u32,
-    boxes: HashMap<String, RawBox>,
-    info_items: HashMap<String, ItemInfoBox>,
-    full_ptr: Ptr,
-    data_ptr: Ptr,
+    pub(crate) version: u8,
+    pub(crate) flags: u32,
+    pub(crate) boxes: HashMap<String, RawBox>,
+
+    pub(crate) iinf_box: Option<ItemInfoBox>,
+    pub(crate) iloc_box: Option<ItemLocationBox>,
+
+    pub(crate) full_ptr: Ptr,
+    pub(crate) data_ptr: Ptr,
 }
 
 impl MetaBox {
@@ -293,7 +341,6 @@ impl MetaBox {
 
         let mut iinf_box: Option<ItemInfoBox> = None;
         let mut iloc_box: Option<ItemLocationBox> = None;
-        let mut info_items = HashMap::new();
 
         let mut boxes = HashMap::new();
         loop {
@@ -324,21 +371,42 @@ impl MetaBox {
             boxes.insert(raw_box.box_type.clone(), raw_box);
         }
 
-        // check required boxes
-        if iinf_box.is_none() || iloc_box.is_none() {
-            return Err(anyhow!("Missing required boxes"));
-        }
-
-        // make item info entry boxes
-
         Ok(Self {
             version,
             flags,
             boxes,
+            iinf_box,
+            iloc_box,
             full_ptr: raw_box.full_ptr.clone(),
             data_ptr: raw_box.data_ptr.clone(),
-            info_items,
         })
+    }
+
+    fn get_item_ptr(&self, item_type: &str) -> Option<Vec<Ptr>> {
+        // get item info box entry
+        let iinf_entry = self
+            .iinf_box
+            .as_ref()?
+            .entries
+            .iter()
+            .find(|e| e.item_type == item_type)?;
+
+        let item_id = iinf_entry.item_id;
+
+        // get item location entry
+        let iloc_entry = self.iloc_box.as_ref()?.entries.get(&item_id)?;
+        let mut ptrs = Vec::new();
+
+        for extent in &iloc_entry.extents {
+            let ptr = Ptr {
+                offset: iloc_entry.base_offset + extent.extent_offset,
+                length: extent.extent_length as usize,
+            };
+
+            ptrs.push(ptr);
+        }
+
+        Some(ptrs)
     }
 }
 
@@ -353,16 +421,16 @@ fn get_version_and_flags(data: &[u8]) -> Result<(u8, u32)> {
     Ok((version, flags))
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct ItemInfoBox {
-    version: u8,
-    flags: u32,
+    pub(crate) version: u8,
+    pub(crate) flags: u32,
 
-    counts: u16,
-    entries: Vec<ItemInfoEntry>,
+    pub(crate) entries: Vec<ItemInfoEntry>,
 
-    full_ptr: Ptr,
-    data_ptr: Ptr,
+    pub(crate) full_ptr: Ptr,
+    pub(crate) data_ptr: Ptr,
 }
 
 impl ItemInfoBox {
@@ -402,7 +470,6 @@ impl ItemInfoBox {
         Ok(Self {
             version,
             flags,
-            counts,
             entries,
             full_ptr: raw_box.full_ptr.clone(),
             data_ptr: raw_box.data_ptr.clone(),
@@ -410,15 +477,16 @@ impl ItemInfoBox {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct ItemInfoEntry {
-    version: u8,
-    flags: u32,
+    pub(crate) version: u8,
+    pub(crate) flags: u32,
 
-    item_id: u16,
-    protection_index: u16,
+    pub(crate) item_id: u32,
+    pub(crate) protection_index: u16,
 
-    item_type: String,
+    pub(crate) item_type: String,
 }
 
 impl ItemInfoEntry {
@@ -446,7 +514,7 @@ impl ItemInfoEntry {
         }
 
         // read item id
-        let item_id = u16::from_be_bytes([data[4], data[5]]);
+        let item_id = u16::from_be_bytes([data[4], data[5]]) as u32;
 
         // read protection index
         let protection_index = u16::from_be_bytes([data[6], data[7]]);
@@ -464,25 +532,26 @@ impl ItemInfoEntry {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct ItemLocationBox {
-    version: u8,
-    flags: u32,
+    pub(crate) version: u8,
+    pub(crate) flags: u32,
 
-    entries: HashMap<u32, ItemLocationEntry>,
+    pub(crate) entries: HashMap<u32, ItemLocationEntry>,
 
-    full_ptr: Ptr,
-    data_ptr: Ptr,
+    pub(crate) full_ptr: Ptr,
+    pub(crate) data_ptr: Ptr,
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct ItemLocationEntry {
-    item_id: u32,
-    construction_method: u16,
-    data_reference_index: u16,
-    base_offset: u64,
-    extent_count: u16,
-    extents: Vec<ItemLocationExtent>,
+    pub(crate) item_id: u32,
+    pub(crate) construction_method: u16,
+    pub(crate) data_reference_index: u16,
+    pub(crate) base_offset: u64,
+    pub(crate) extents: Vec<ItemLocationExtent>,
 }
 
 impl ItemLocationEntry {
@@ -558,12 +627,12 @@ impl ItemLocationEntry {
             construction_method,
             data_reference_index,
             base_offset,
-            extent_count,
             extents,
         })
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct ItemLocationExtent {
     extent_index: u64,
@@ -643,7 +712,10 @@ mod tests {
 
     use tokio::fs;
 
-    use crate::heic::FullBox;
+    use crate::{
+        heic::{heic, FullBox},
+        ExtractRawExif,
+    };
 
     static INIT: Once = Once::new();
 
@@ -655,18 +727,18 @@ mod tests {
         });
     }
 
+    const SAMPLES: [&str; 2] = [
+        "sample/sample_by_iphone15-pro-max.heic",
+        "sample/sample_by_hasselblad-x2d.heic",
+    ];
+
     #[tokio::test]
     async fn read_full_box() {
         // init logger
         init_logger();
 
-        // test files
-        let files = vec![
-            "sample/sample_by_iphone15-pro-max.heic",
-            "sample/sample_by_hasselblad-x2d.heic",
-        ];
-
-        for file in files.into_iter() {
+        // read full box from samples
+        for file in SAMPLES.into_iter() {
             let mut f = fs::File::open(file).await.expect("Failed to open file");
 
             let full_box = FullBox::from_reader(&mut f)
@@ -674,6 +746,20 @@ mod tests {
                 .expect("failed to read full box");
 
             println!("--------{}\n{:#?}", file, full_box);
+        }
+    }
+
+    #[tokio::test]
+    async fn extract_exif_from_heic() {
+        // init logger
+        init_logger();
+
+        // extract exif from samples
+        for file in SAMPLES.into_iter() {
+            let heic = heic(file).expect("Failed to open file");
+            let exif_data = heic.extract().await.expect("Failed to extract exif");
+
+            println!("--------{}\n{}", file, hex::encode(&exif_data));
         }
     }
 }

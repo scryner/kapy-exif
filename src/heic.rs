@@ -729,24 +729,13 @@ impl ItemLocationBox {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Once;
-
     use tokio::fs;
 
     use crate::{
         heic::{heic, FullBox},
+        internal::init_logger,
         ExtractRawExif,
     };
-
-    static INIT: Once = Once::new();
-
-    fn init_logger() {
-        INIT.call_once(|| {
-            env_logger::builder()
-                .filter_level(log::LevelFilter::Debug)
-                .init();
-        });
-    }
 
     const SAMPLES: [&str; 2] = [
         "sample/sample_by_iphone15-pro-max.heic",
@@ -780,7 +769,12 @@ mod tests {
             let heic = heic(file).await.expect("Failed to open file");
             let exif_data = heic.extract().await.expect("Failed to extract exif");
 
-            println!("--------{}\n{}", file, hex::encode(&exif_data));
+            println!(
+                "--------{} (content length: {})\n{}",
+                file,
+                exif_data.len(),
+                hex::encode(&exif_data)
+            );
         }
     }
 }

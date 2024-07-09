@@ -2,9 +2,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 mod heic;
+mod internal;
 mod jpeg;
 
 pub use heic::heic;
+pub use jpeg::jpeg;
+
 use tokio::io::AsyncWrite;
 
 #[async_trait]

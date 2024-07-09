@@ -11,36 +11,43 @@ use async_trait::async_trait;
 use log::debug;
 use tokio::{
     fs::File,
-    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt},
+    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite},
     sync::Mutex,
 };
 
-use crate::ExtractRawExif;
+use crate::{CopyWithRawExif, ExtractRawExif};
 
-pub fn heic(path: impl AsRef<Path>) -> Result<impl ExtractRawExif> {
+pub async fn heic(path: impl AsRef<Path>) -> Result<impl ExtractRawExif> {
     // open file
-    let file =
-        std::fs::File::open(path.as_ref()).map_err(|e| anyhow!("Failed to open file: {}", e))?;
+    let mut file = File::open(path.as_ref())
+        .await
+        .map_err(|e| anyhow!("Failed to open file: {}", e))?;
+
+    // decode full box
+    let full_box = FullBox::from_reader(&mut file).await?;
+
+    // seek start position for file
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(|e| anyhow!("Failed to seek: {}", e))?;
 
     Ok(Heic {
-        file: Arc::new(Mutex::new(File::from_std(file))),
+        file: Arc::new(Mutex::new(file)),
+        full_box,
     })
 }
 
 struct Heic {
     file: Arc<Mutex<File>>,
+    full_box: FullBox,
 }
 
 #[async_trait]
 impl ExtractRawExif for Heic {
     async fn extract(&self) -> Result<Vec<u8>> {
-        let mut guard = self.file.lock().await;
-
-        // read full box
-        let full_box = FullBox::from_reader(&mut *guard).await?;
-
         // get offset and length of exif box
-        let exif_ptrs = full_box
+        let exif_ptrs = self
+            .full_box
             .meta
             .get_item_ptr("Exif")
             .ok_or(anyhow!("Exif box not found"))?;
@@ -55,6 +62,9 @@ impl ExtractRawExif for Heic {
             // I don't know why -4 is needed currently (it may be another header)
             return Err(anyhow!("Exif length is too large: {}", exif_ptr.length - 4));
         }
+
+        // read exif content from file
+        let mut guard = self.file.lock().await;
 
         // seek to raw exif content
         guard.seek(SeekFrom::Start(exif_ptr.offset + 4)).await?;
@@ -76,6 +86,17 @@ impl ExtractRawExif for Heic {
         }
 
         Ok(exif_data)
+    }
+}
+
+#[async_trait]
+impl CopyWithRawExif for Heic {
+    async fn copy_with_raw_exif(
+        &self,
+        exif: Vec<u8>,
+        writer: impl AsyncWrite + Send + Sync,
+    ) -> Result<()> {
+        todo!()
     }
 }
 
@@ -756,7 +777,7 @@ mod tests {
 
         // extract exif from samples
         for file in SAMPLES.into_iter() {
-            let heic = heic(file).expect("Failed to open file");
+            let heic = heic(file).await.expect("Failed to open file");
             let exif_data = heic.extract().await.expect("Failed to extract exif");
 
             println!("--------{}\n{}", file, hex::encode(&exif_data));

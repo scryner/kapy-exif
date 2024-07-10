@@ -6,7 +6,7 @@ use std::{path::Path, sync::Arc};
 
 use tokio::{
     fs::File,
-    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, SeekFrom},
+    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, SeekFrom},
     sync::Mutex,
 };
 
@@ -60,6 +60,7 @@ macro_rules! markers {
 }
 
 markers!(
+    // (marker, value, has_payload)
     (SOF0, 0xffc0, true),
     (SOF1, 0xffc1, true),
     (SOF2, 0xffc2, true),
@@ -99,7 +100,7 @@ markers!(
     (COM, 0xfffe, true)
 );
 
-pub async fn jpeg(path: impl AsRef<Path>) -> Result<impl ExtractRawExif> {
+pub async fn jpeg(path: impl AsRef<Path>) -> Result<impl ExtractRawExif + CopyWithRawExif> {
     // open file
     let mut file = File::open(path.as_ref())
         .await
@@ -125,40 +126,11 @@ struct Jpeg {
 #[async_trait]
 impl ExtractRawExif for Jpeg {
     async fn extract(&self) -> Result<Vec<u8>> {
-        // traverse structures to find APP1 marker
-        for (marker, payload) in self.structures.iter() {
-            if marker.is_app_segment() {
-                match *payload {
-                    Payload::Content(offset, length) => {
-                        let mut guard = self.file.lock().await;
+        let mut guard = self.file.lock().await;
 
-                        // seek to the payload
-                        guard.seek(SeekFrom::Start(offset)).await?;
-
-                        // make buffer to read exif
-                        let mut buf = vec![0u8; length as usize];
-
-                        // read first 4 bytes to check starting with "Exif"
-                        guard.read_exact(&mut buf[0..4]).await?;
-
-                        if &buf[0..4] != b"Exif" {
-                            continue;
-                        }
-
-                        // read the rest of exif
-                        guard.read_exact(&mut buf[4..]).await?;
-
-                        // we got exif, return it
-                        return Ok(buf);
-                    }
-                    Payload::NoContent(_) => {
-                        return Err(anyhow!("Invalid payload for APP segment: {:?}", marker));
-                    }
-                }
-            }
-        }
-
-        Err(anyhow!("No exif segment found"))
+        // extract exif
+        let (_, exif_data) = extract_exif(&mut *guard, &self.structures).await?;
+        Ok(exif_data)
     }
 }
 
@@ -166,10 +138,70 @@ impl ExtractRawExif for Jpeg {
 impl CopyWithRawExif for Jpeg {
     async fn copy_with_raw_exif(
         &self,
-        exif: Vec<u8>,
-        writer: impl AsyncWrite + Send + Sync,
+        exif: &[u8],
+        mut writer: impl AsyncWrite + Send + Sync + Unpin,
     ) -> Result<()> {
-        todo!()
+        // get reader to read from original file
+        let mut reader = self.file.lock().await;
+
+        // extract exif data
+        let (prev_exif_marker, _) = extract_exif(&mut *reader, &self.structures).await?;
+
+        // write markers
+        for (marker, payload) in self.structures.iter() {
+            if *marker == prev_exif_marker {
+                // write marker
+                writer.write_u16(marker.value()).await?;
+
+                // write length
+                writer.write_u16(exif.len() as u16 + 2).await?; // additional 2 bytes means length field itself
+
+                // write exif data
+                writer.write_all(exif).await?;
+            } else if *marker == Marker::SOS {
+                // write SOS marker and the rest of the structures
+                writer.write_u16(marker.value()).await?;
+
+                if let Payload::NoContent(next_offset) = payload {
+                    // seek to the next offset
+                    reader.seek(SeekFrom::Start(*next_offset)).await?;
+
+                    // copy reader to writer
+                    tokio::io::copy(&mut *reader, &mut writer).await?;
+
+                    return Ok(());
+                } else {
+                    return Err(anyhow!("Invalid payload for SOS marker"));
+                }
+            } else {
+                // write other markers
+                match payload {
+                    Payload::Content(offset, length) => {
+                        // write marker
+                        writer.write_u16(marker.value()).await?;
+
+                        // write length
+                        writer.write_u16(*length + 2).await?; // additional 2 bytes means length field itself
+
+                        // seek to payload
+                        reader.seek(SeekFrom::Start(*offset)).await?;
+
+                        // read payload
+                        let mut payload = vec![0u8; *length as usize];
+                        reader.read_exact(&mut payload).await?;
+
+                        // write payload to writer
+                        writer.write_all(&payload).await?;
+                    }
+                    Payload::NoContent(_) => {
+                        // write marker only
+                        writer.write_u16(marker.value()).await?;
+                    }
+                }
+            }
+        }
+
+        Err(anyhow!("Invalid structure: SOS marker not found")) // actually, never reached (we've been already checked while decoding)
     }
 }
 
@@ -202,12 +234,6 @@ where
     r.seek(SeekFrom::Start(0))
         .await
         .map_err(|e| anyhow!("Failed to seek: {}", e))?;
-
-    // read first marker and check whether it's SOI
-    let soi = r.read_u16().await?;
-    if soi != Marker::SOI.value() {
-        return Err(anyhow!("Invalid SOI marker: {:x?}", soi));
-    }
 
     // loop through markers
     loop {
@@ -254,6 +280,12 @@ where
 
         // SOS marker means the end of structures of interest, so return it
         if marker == Marker::SOS {
+            // check first marker is SOI
+            if structures[0].0 != Marker::SOI {
+                // never panic: at least, SOS marker would be found
+                return Err(anyhow!("Invalid SOI marker"));
+            }
+
             return Ok(structures);
         }
     }
@@ -261,14 +293,61 @@ where
     Err(anyhow!("Premature end of file"))
 }
 
+async fn extract_exif<R>(
+    r: &mut R,
+    structures: &Vec<(Marker, Payload)>,
+) -> Result<(Marker, Vec<u8>)>
+where
+    R: AsyncSeek + AsyncRead + Send + Sync + Unpin,
+{
+    // traverse structures to find APP1 marker
+    for (marker, payload) in structures.iter() {
+        if marker.is_app_segment() {
+            match *payload {
+                Payload::Content(offset, length) => {
+                    // seek to the payload
+                    r.seek(SeekFrom::Start(offset)).await?;
+
+                    // make buffer to read exif
+                    let mut buf = vec![0u8; length as usize];
+
+                    // read first 4 bytes to check starting with "Exif"
+                    r.read_exact(&mut buf[0..4]).await?;
+
+                    if &buf[0..4] != b"Exif" {
+                        continue;
+                    }
+
+                    // read the rest of exif
+                    r.read_exact(&mut buf[4..]).await?;
+
+                    // we got exif, return it
+                    return Ok((*marker, buf));
+                }
+                Payload::NoContent(_) => {
+                    return Err(anyhow!("Invalid payload for APP segment: {:?}", marker));
+                }
+            }
+        }
+    }
+
+    Err(anyhow!("No exif segment found"))
+}
+
 #[cfg(test)]
 mod tests {
-    use tokio::fs::File;
+    use std::io::SeekFrom;
+
+    use anyhow::Result;
+    use tokio::{
+        fs::File,
+        io::{AsyncReadExt, AsyncSeekExt, BufReader},
+    };
 
     use crate::{
         internal::init_logger,
         jpeg::{decode_structures, jpeg},
-        ExtractRawExif,
+        CopyWithRawExif, ExtractRawExif,
     };
 
     const SAMPLES: [&str; 1] = ["sample/sample_by_pentax-k1.jpg"];
@@ -311,5 +390,71 @@ mod tests {
                 hex::encode(&exif_data)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn copy_with_raw_exif_for_jpeg() {
+        // init logger
+        init_logger();
+
+        // copy with raw exif (consequently, copy exactly the same file)
+        for file in SAMPLES.into_iter() {
+            // make tempfile
+            let tmp = tempfile::tempfile().expect("Failed to create tempfile");
+            let mut tmp = File::from_std(tmp);
+
+            // copy with raw exif
+            {
+                let jpeg = jpeg(file).await.expect("Failed to open file");
+                let exif_data = jpeg.extract().await.expect("Failed to extract exif");
+                jpeg.copy_with_raw_exif(&exif_data, &mut tmp)
+                    .await
+                    .expect("Failed to copy with raw exif");
+            }
+
+            // re-open the original file
+            let mut orig = File::open(file).await.expect("Failed to open file");
+
+            // compare the original file and the copied file
+            assert!(compare_files(&mut orig, &mut tmp)
+                .await
+                .expect("Failed to compare files"));
+        }
+    }
+
+    async fn compare_files(file1: &mut File, file2: &mut File) -> Result<bool> {
+        const BUFFER_SIZE: usize = 8192;
+
+        // seek to the beginning
+        file1.seek(SeekFrom::Start(0)).await?;
+        file2.seek(SeekFrom::Start(0)).await?;
+
+        // make reader
+        let mut reader1 = BufReader::new(file1);
+        let mut reader2 = BufReader::new(file2);
+
+        // make buffer
+        let mut buffer1 = vec![0; BUFFER_SIZE];
+        let mut buffer2 = vec![0; BUFFER_SIZE];
+
+        // compare by block
+        loop {
+            let bytes_read1 = reader1.read(&mut buffer1).await?;
+            let bytes_read2 = reader2.read(&mut buffer2).await?;
+
+            if bytes_read1 != bytes_read2 {
+                return Ok(false);
+            }
+
+            if bytes_read1 == 0 {
+                break; // EOF
+            }
+
+            if buffer1[..bytes_read1] != buffer2[..bytes_read1] {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 }

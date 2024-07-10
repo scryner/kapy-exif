@@ -19,7 +19,7 @@ pub trait ExtractRawExif {
 pub trait CopyWithRawExif {
     async fn copy_with_raw_exif(
         &self,
-        exif: Vec<u8>,
-        writer: impl AsyncWrite + Send + Sync,
+        exif: &[u8],
+        writer: impl AsyncWrite + Send + Sync + Unpin,
     ) -> Result<()>;
 }

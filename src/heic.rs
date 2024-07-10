@@ -93,7 +93,7 @@ impl ExtractRawExif for Heic {
 impl CopyWithRawExif for Heic {
     async fn copy_with_raw_exif(
         &self,
-        exif: Vec<u8>,
+        exif: &[u8],
         writer: impl AsyncWrite + Send + Sync,
     ) -> Result<()> {
         todo!()

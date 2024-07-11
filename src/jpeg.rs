@@ -125,12 +125,14 @@ struct Jpeg {
 
 #[async_trait]
 impl ExtractRawExif for Jpeg {
-    async fn extract(&self) -> Result<Vec<u8>> {
+    async fn extract(&self) -> Result<Option<Vec<u8>>> {
         let mut guard = self.file.lock().await;
 
         // extract exif
-        let (_, exif_data) = extract_exif(&mut *guard, &self.structures).await?;
-        Ok(exif_data)
+        match extract_exif(&mut *guard, &self.structures).await? {
+            Some((_, exif)) => Ok(Some(exif)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -145,7 +147,8 @@ impl CopyWithRawExif for Jpeg {
         let mut reader = self.file.lock().await;
 
         // extract exif data
-        let (prev_exif_marker, _) = extract_exif(&mut *reader, &self.structures).await?;
+        let prev_exif = extract_exif(&mut *reader, &self.structures).await?;
+        let (prev_exif_marker, _) = prev_exif.ok_or_else(|| anyhow!("Exif data not found"))?;
 
         // write markers
         for (marker, payload) in self.structures.iter() {
@@ -296,7 +299,7 @@ where
 async fn extract_exif<R>(
     r: &mut R,
     structures: &Vec<(Marker, Payload)>,
-) -> Result<(Marker, Vec<u8>)>
+) -> Result<Option<(Marker, Vec<u8>)>>
 where
     R: AsyncSeek + AsyncRead + Send + Sync + Unpin,
 {
@@ -322,7 +325,7 @@ where
                     r.read_exact(&mut buf[4..]).await?;
 
                     // we got exif, return it
-                    return Ok((*marker, buf));
+                    return Ok(Some((*marker, buf)));
                 }
                 Payload::NoContent(_) => {
                     return Err(anyhow!("Invalid payload for APP segment: {:?}", marker));
@@ -331,7 +334,7 @@ where
         }
     }
 
-    Err(anyhow!("No exif segment found"))
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -381,7 +384,11 @@ mod tests {
         // extract exif from samples
         for file in SAMPLES.into_iter() {
             let jpeg = jpeg(file).await.expect("Failed to open file");
-            let exif_data = jpeg.extract().await.expect("Failed to extract exif");
+            let exif_data = jpeg
+                .extract()
+                .await
+                .expect("Failed to extract exif")
+                .expect("Exif not found");
 
             println!(
                 "--------{} (content length: {})\n{}",
@@ -406,7 +413,11 @@ mod tests {
             // copy with raw exif
             {
                 let jpeg = jpeg(file).await.expect("Failed to open file");
-                let exif_data = jpeg.extract().await.expect("Failed to extract exif");
+                let exif_data = jpeg
+                    .extract()
+                    .await
+                    .expect("Failed to extract exif")
+                    .expect("Exif not found");
                 jpeg.copy_with_raw_exif(&exif_data, &mut tmp)
                     .await
                     .expect("Failed to copy with raw exif");

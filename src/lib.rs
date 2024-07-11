@@ -12,7 +12,7 @@ use tokio::io::AsyncWrite;
 
 #[async_trait]
 pub trait ExtractRawExif {
-    async fn extract(&self) -> Result<Vec<u8>>;
+    async fn extract(&self) -> Result<Option<Vec<u8>>>;
 }
 
 #[async_trait]

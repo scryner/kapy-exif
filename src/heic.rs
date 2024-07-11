@@ -44,13 +44,12 @@ struct Heic {
 
 #[async_trait]
 impl ExtractRawExif for Heic {
-    async fn extract(&self) -> Result<Vec<u8>> {
+    async fn extract(&self) -> Result<Option<Vec<u8>>> {
         // get offset and length of exif box
-        let exif_ptrs = self
-            .full_box
-            .meta
-            .get_item_ptr("Exif")
-            .ok_or(anyhow!("Exif box not found"))?;
+        let exif_ptrs = match self.full_box.meta.get_item_ptr("Exif") {
+            Some(ptr) => ptr,
+            None => return Ok(None),
+        };
 
         let exif_ptr = exif_ptrs.first().ok_or(anyhow!("Exif extent not found"))?;
         debug!("exif ptr: {:?}", exif_ptr);
@@ -85,7 +84,7 @@ impl ExtractRawExif for Heic {
             return Err(anyhow!("Invalid exif data: not started with 'Exif'"));
         }
 
-        Ok(exif_data)
+        Ok(Some(exif_data))
     }
 }
 
@@ -767,7 +766,11 @@ mod tests {
         // extract exif from samples
         for file in SAMPLES.into_iter() {
             let heic = heic(file).await.expect("Failed to open file");
-            let exif_data = heic.extract().await.expect("Failed to extract exif");
+            let exif_data = heic
+                .extract()
+                .await
+                .expect("Failed to extract exif")
+                .expect("Exif data must be existed");
 
             println!(
                 "--------{} (content length: {})\n{}",

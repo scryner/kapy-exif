@@ -4,6 +4,7 @@ use async_trait::async_trait;
 mod heic;
 mod internal;
 mod jpeg;
+mod scoped_reader;
 
 pub use heic::heic;
 pub use jpeg::jpeg;

@@ -15,9 +15,9 @@ use tokio::{
     sync::Mutex,
 };
 
-use crate::{CopyWithRawExif, ExtractRawExif};
+use crate::{scoped_reader::ScopedReader, CopyWithRawExif, ExtractRawExif};
 
-pub async fn heic(path: impl AsRef<Path>) -> Result<impl ExtractRawExif> {
+pub async fn heic(path: impl AsRef<Path>) -> Result<Heic> {
     // open file
     let mut file = File::open(path.as_ref())
         .await
@@ -37,9 +37,94 @@ pub async fn heic(path: impl AsRef<Path>) -> Result<impl ExtractRawExif> {
     })
 }
 
-struct Heic {
+pub struct Heic {
     file: Arc<Mutex<File>>,
     full_box: FullBox,
+}
+
+impl Heic {
+    async fn reconstruct(&self, mut w: impl AsyncWrite + Send + Sync + Unpin) -> Result<()> {
+        // write ftyp
+        self.copy_with_scoped_ptr(&mut w, &self.full_box.ftyp.full_ptr)
+            .await?;
+
+        // write meta
+        self.copy_with_scoped_ptr(&mut w, &self.full_box.meta.full_ptr)
+            .await?;
+
+        // write free
+        match &self.full_box.free {
+            Some(free) => self.copy_with_scoped_ptr(&mut w, &free.full_ptr).await?,
+            None => {
+                println!("free box is not found");
+            }
+        }
+
+        // write mdat
+        self.copy_with_scoped_ptr(&mut w, &self.full_box.media.full_ptr)
+            .await?;
+
+        return Ok(());
+
+        // traverse info box entries
+        let meta = &self.full_box.meta;
+        let iinf_entry = meta.iinf_box.as_ref();
+
+        match iinf_entry {
+            Some(iinf_entry) => {
+                // traverse iloc entries
+                for entry in iinf_entry.entries.iter() {
+                    // get item ptrs
+                    let ptrs = meta
+                        .get_item_ptr(&entry.item_type)
+                        .ok_or(anyhow!("Item not found"))?;
+
+                    for ptr in ptrs {
+                        self.copy_with_scoped(&mut w, ptr.offset, ptr.length)
+                            .await?;
+                    }
+                }
+
+                Ok(())
+            }
+            None => {
+                // just write mdat
+                self.copy_with_scoped_ptr(&mut w, &self.full_box.media.full_ptr)
+                    .await
+            }
+        }
+    }
+
+    async fn copy_with_scoped_ptr(
+        &self,
+        w: &mut (impl AsyncWrite + Send + Sync + Unpin),
+        ptr: &Ptr,
+    ) -> Result<()> {
+        let offset = ptr.offset;
+        let length = ptr.length;
+
+        self.copy_with_scoped(w, offset, length).await
+    }
+
+    async fn copy_with_scoped(
+        &self,
+        w: &mut (impl AsyncWrite + Send + Sync + Unpin),
+        offset: u64,
+        length: usize,
+    ) -> Result<()> {
+        // make scoped reader for ftyp
+        let mut r = self.file.lock().await;
+
+        // make AsyncRead for r
+        let mut scoped_reader = ScopedReader::new(&mut *r, offset, length as u64).await?;
+
+        // copy scoped reader to writer
+        // let mut pinned_writer = Box::pin(w);
+        // tokio::io::copy(&mut scoped_reader, &mut pinned_writer).await?;
+        tokio::io::copy(&mut scoped_reader, w).await?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -57,7 +142,7 @@ impl ExtractRawExif for Heic {
         // check exif length to avoid OOM (maybe, due to malicious file or uncaught errors on parsing ISOBMFF format)
         const MAX_LEN: usize = 1024 * 1024 * 8; // 8MB
 
-        if exif_ptr.length - 4 > MAX_LEN {
+        if (exif_ptr.length - 4) > MAX_LEN {
             // I don't know why -4 is needed currently (it may be another header)
             return Err(anyhow!("Exif length is too large: {}", exif_ptr.length - 4));
         }
@@ -283,6 +368,7 @@ struct FileTypeBox {
     pub(crate) minor_version: u32,
     pub(crate) compatible_brands: Vec<String>,
 
+    pub(crate) full_ptr: Ptr,
     pub(crate) data_ptr: Ptr,
 }
 
@@ -324,6 +410,7 @@ impl FileTypeBox {
             major_brand,
             minor_version: minor_brand,
             compatible_brands,
+            full_ptr: raw_box.full_ptr.clone(),
             data_ptr: raw_box.data_ptr.clone(),
         })
     }
@@ -778,6 +865,29 @@ mod tests {
                 exif_data.len(),
                 hex::encode(&exif_data)
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn reconstruct_heic() {
+        // init logger
+        init_logger();
+
+        // reconstruct heic from samples
+        for file in SAMPLES.into_iter() {
+            let heic = heic(file).await.expect("Failed to open file");
+
+            let mut buf = Vec::new();
+            heic.reconstruct(&mut buf)
+                .await
+                .expect("Failed to reconstruct heic");
+
+            println!("--------{} (content length: {})", file, buf.len());
+
+            // write to file
+            tokio::fs::write("./reconstructed.heic", &buf)
+                .await
+                .expect("Failed to write file");
         }
     }
 }

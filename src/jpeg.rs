@@ -308,21 +308,27 @@ where
         if marker.is_app_segment() {
             match *payload {
                 Payload::Content(offset, length) => {
+                    if length < 6 {
+                        // insufficient length
+                        continue;
+                    }
+
                     // seek to the payload
                     r.seek(SeekFrom::Start(offset)).await?;
 
                     // make buffer to read exif
-                    let mut buf = vec![0u8; length as usize];
+                    let mut ascii_id = vec![0u8; 6];
+                    let mut buf = vec![0u8; length as usize - 6];
 
-                    // read first 4 bytes to check starting with "Exif"
-                    r.read_exact(&mut buf[0..4]).await?;
+                    // read first 6 bytes to check starting with "Exif\0\0"
+                    r.read_exact(&mut ascii_id[..]).await?;
 
-                    if &buf[0..4] != b"Exif" {
+                    if &ascii_id[..] != b"Exif\0\0" {
                         continue;
                     }
 
                     // read the rest of exif
-                    r.read_exact(&mut buf[4..]).await?;
+                    r.read_exact(&mut buf[..]).await?;
 
                     // we got exif, return it
                     return Ok(Some((*marker, buf)));

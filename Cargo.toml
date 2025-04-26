@@ -2,6 +2,7 @@
 name = "kapy-exif"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -11,9 +12,14 @@ async-trait = "0.1.88"
 hex = "0.4.3"
 log = "0.4.27"
 pin-project = "1.1.10"
+pkg-config = "0.3.32"
 rand = "0.9.1"
 tokio = { version = "1.44.2", features = ["full"] }
 
 [dev-dependencies]
 env_logger = "0.11.8"
 tempfile = "3.19.1"
+
+[build-dependencies]
+cc = "1.2.20"
+pkg-config = "0.3.32"

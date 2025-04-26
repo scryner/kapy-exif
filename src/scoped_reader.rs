@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Result;
 use pin_project::pin_project;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, ReadBuf};
 
 #[pin_project]
 pub struct ScopedReader<R: AsyncRead + AsyncSeek> {

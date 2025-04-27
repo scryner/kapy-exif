@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     io::{Cursor, ErrorKind, SeekFrom},
     path::Path,
     sync::Arc,
@@ -8,6 +7,7 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use log::debug;
 use tokio::{
     fs::File,
@@ -60,31 +60,40 @@ impl Heic {
             }
         }
 
-        // write mdat
-        self.copy_with_scoped_ptr(&mut w, &self.full_box.media.full_ptr)
-            .await?;
-
-        return Ok(());
-
         // traverse info box entries
         let meta = &self.full_box.meta;
-        let iinf_entry = meta.iinf_box.as_ref();
+        let iloc_box = meta.iloc_box.as_ref();
 
-        match iinf_entry {
-            Some(iinf_entry) => {
-                // traverse iloc entries
-                for entry in iinf_entry.entries.iter() {
-                    // get item ptrs
-                    let ptrs = meta
-                        .get_item_ptr(&entry.item_type)
-                        .ok_or(anyhow!("Item not found"))?;
+        match iloc_box {
+            Some(iloc_box) => {
+                // write mdat header
+                let mdat_box = &self.full_box.media;
+                {
+                    // TODO: reconstruct with adjusted mdat box offset and its length
+                    let offset = mdat_box.full_ptr.offset;
+                    let length = (mdat_box.data_ptr.offset - offset) as usize;
+                    if length != 16 {
+                        return Err(anyhow!(
+                            "Invalid mdata size: must be 16, but got {}",
+                            length
+                        ));
+                    }
 
-                    for ptr in ptrs {
+                    self.copy_with_scoped(&mut w, offset, length).await?;
+                }
+
+                // write mdat content
+                for (_, iloc_entry) in iloc_box.entries.iter() {
+                    for extent in iloc_entry.extents.iter() {
+                        let ptr = extent.ptr(iloc_entry);
+                        if ptr.offset == 0 {
+                            continue;
+                        }
+
                         self.copy_with_scoped(&mut w, ptr.offset, ptr.length)
                             .await?;
                     }
                 }
-
                 Ok(())
             }
             None => {
@@ -424,7 +433,7 @@ impl FileTypeBox {
 struct MetaBox {
     pub(crate) version: u8,
     pub(crate) flags: u32,
-    pub(crate) boxes: HashMap<String, RawBox>,
+    pub(crate) boxes: IndexMap<String, RawBox>,
 
     pub(crate) iinf_box: Option<ItemInfoBox>,
     pub(crate) iloc_box: Option<ItemLocationBox>,
@@ -452,7 +461,7 @@ impl MetaBox {
         let mut iinf_box: Option<ItemInfoBox> = None;
         let mut iloc_box: Option<ItemLocationBox> = None;
 
-        let mut boxes = HashMap::new();
+        let mut boxes = IndexMap::new();
         loop {
             let mut raw_box = match RawBox::from_reader(&mut cursor).await? {
                 Some(b) => b,
@@ -648,7 +657,7 @@ struct ItemLocationBox {
     pub(crate) version: u8,
     pub(crate) flags: u32,
 
-    pub(crate) entries: HashMap<u32, ItemLocationEntry>,
+    pub(crate) entries: IndexMap<u32, ItemLocationEntry>,
 
     pub(crate) full_ptr: Ptr,
     pub(crate) data_ptr: Ptr,
@@ -750,6 +759,15 @@ struct ItemLocationExtent {
     extent_length: u64,
 }
 
+impl ItemLocationExtent {
+    fn ptr(&self, base: &ItemLocationEntry) -> Ptr {
+        Ptr {
+            offset: base.base_offset + self.extent_offset,
+            length: self.extent_length as usize,
+        }
+    }
+}
+
 impl ItemLocationBox {
     async fn from_raw_box<R>(raw_box: &RawBox, r: &mut R) -> Result<Self>
     where
@@ -788,7 +806,7 @@ impl ItemLocationBox {
         };
 
         // make iloc entries
-        let mut entries = HashMap::new();
+        let mut entries = IndexMap::new();
 
         for _ in 0..count {
             let entry = ItemLocationEntry::from_cursor(

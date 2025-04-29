@@ -87,8 +87,8 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_reader_large_content() -> Result<()> {
-        let mut rng = rand::thread_rng();
-        let data: Vec<u8> = (0..10 * 1024 * 1024).map(|_| rng.gen()).collect(); // randomly filled vector with 10MB
+        let mut rng = rand::rng();
+        let data: Vec<u8> = (0..10 * 1024 * 1024).map(|_| rng.random()).collect(); // randomly filled vector with 10MB
         let cursor = Cursor::new(data.clone());
 
         let mut reader = ScopedReader::new(cursor, 5 * 1024 * 1024, 5 * 1024 * 1024).await?; // read 5MB from the middle

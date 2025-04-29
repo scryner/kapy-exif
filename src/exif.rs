@@ -102,7 +102,9 @@ impl Metadata {
 
 #[cfg(test)]
 mod tests {
-    use crate::{exif::Metadata, heic, jpeg, CopyWithRawExif, ExtractRawExif};
+    use crate::{
+        exif::Metadata, heic, internal::init_logger, jpeg, CopyWithRawExif, ExtractRawExif,
+    };
 
     const SAMPLES: [&str; 3] = [
         "sample/sample_by_pentax-k1.jpg",
@@ -175,6 +177,8 @@ mod tests {
 
     #[tokio::test]
     async fn update_gps_info_for_heic() {
+        init_logger();
+
         let file = "sample/sample_by_hasselblad-x2d.heic";
         let image = heic(file).await.expect("Failed to read HEIC file");
 

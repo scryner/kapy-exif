@@ -44,6 +44,7 @@ pub async fn heic(path: impl AsRef<Path>) -> Result<Heic> {
 
 pub struct Heic {
     file: Arc<Mutex<File>>,
+    #[allow(unused)]
     file_length: u64,
     full_box: FullBox,
 }

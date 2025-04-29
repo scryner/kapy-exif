@@ -65,11 +65,11 @@ impl CopyWithRawExif for Heic {
                 None => 0,
             }
         };
-        let (exif_item_id, prev_exif_len, prev_exif_extent) = {
-            let (id, (exif_ptr, exif_extent)) =
-                self.exif_ptr().ok_or(anyhow!("Exif item not found"))?;
-            (id, exif_ptr.length + 4, exif_extent) // 4 bytes is [0, 0, 0, 6] for previously written
-        };
+        let exif_item_id = self
+            .full_box
+            .meta
+            .get_item_id("Exif")
+            .ok_or(anyhow!("Exif item not found"))?;
 
         // make buffer to manipulate meta box
         let meta_len = self.full_box.meta.full_ptr.length;
@@ -98,6 +98,11 @@ impl CopyWithRawExif for Heic {
                 let prev_item = sorted_extents.get(i - 1).unwrap();
                 let expected_offset = prev_item.ptr.offset + prev_item.ptr.length as u64;
 
+                debug!(
+                    "--- expected_offset: {} / actual_offset: {}",
+                    expected_offset, item.ptr.offset
+                );
+
                 if expected_offset > item.ptr.offset {
                     return Err(anyhow!(
                         "Invalid mdat data: overlapped extents were existed"
@@ -108,11 +113,11 @@ impl CopyWithRawExif for Heic {
             }
 
             if item.item_id == exif_item_id {
+                let existed_exif_len = item.ptr.length;
+
                 debug!(
-                    "adjust iloc length: item_id({}/EXIF), length({}), adjusted_length({})",
-                    item.item_id,
-                    item.ptr.length,
-                    exif_len - 4,
+                    "adjust exif iloc length: item_id({}/EXIF), length({}), adjusted_length({})",
+                    item.item_id, existed_exif_len, exif_len,
                 );
 
                 // modify iloc length
@@ -121,15 +126,20 @@ impl CopyWithRawExif for Heic {
                     &self.full_box.meta,
                     ModifyIlocItemKey::Id(exif_item_id),
                     None,
-                    Some(exif_len - 4),
+                    Some(exif_len),
                 )
                 .await?;
 
-                if exif_len > prev_exif_len {
-                    adjust_offset += (exif_len - prev_exif_len) as u64;
+                if exif_len > existed_exif_len {
+                    adjust_offset += (exif_len - existed_exif_len) as u64;
+                    mdat_sources.push(Source::Data(&exif));
+                } else if exif_len < existed_exif_len {
+                    let zeros = (existed_exif_len - exif_len) as u64;
+                    mdat_sources.push(Source::Data(&exif));
+                    mdat_sources.push(Source::Zero(zeros));
+                } else {
+                    mdat_sources.push(Source::Data(&exif));
                 }
-
-                mdat_sources.push(Source::Data(&exif));
             } else {
                 if adjust_offset > 0 {
                     debug!(
@@ -291,7 +301,6 @@ async fn write_mdat<'a>(
             }
             Source::Data(data) => {
                 debug!("copying from data: length({})", data.len());
-                debug!("last 8bytes: hex({:?}))", &data[data.len() - 8..]);
                 w.write_all(data).await?;
             }
             Source::Zero(size) => {

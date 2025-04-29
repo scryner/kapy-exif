@@ -9,7 +9,6 @@ build = "build.rs"
 [dependencies]
 anyhow = "1.0.98"
 async-trait = "0.1.88"
-hex = "0.4.3"
 indexmap = "2.9.0"
 log = "0.4.27"
 pin-project = "1.1.10"
@@ -20,6 +19,7 @@ tokio = { version = "1.44.2", features = ["full"] }
 [dev-dependencies]
 env_logger = "0.11.8"
 tempfile = "3.19.1"
+hex = "0.4.3"
 
 [build-dependencies]
 cc = "1.2.20"

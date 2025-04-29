@@ -157,7 +157,10 @@ impl CopyWithRawExif for Jpeg {
                 writer.write_u16(marker.value()).await?;
 
                 // write length
-                writer.write_u16(exif.len() as u16 + 2).await?; // additional 2 bytes means length field itself
+                writer.write_u16(exif.len() as u16 + 2 + 6).await?; // additional 2 bytes means length field itself, 6 bytes for TIFF header
+
+                // write TIFF header (Exif\0\0)
+                writer.write_all(b"Exif\0\0").await?;
 
                 // write exif data
                 writer.write_all(exif).await?;

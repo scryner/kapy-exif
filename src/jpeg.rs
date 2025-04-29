@@ -348,16 +348,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::io::SeekFrom;
-
-    use anyhow::Result;
-    use tokio::{
-        fs::File,
-        io::{AsyncReadExt, AsyncSeekExt, BufReader},
-    };
+    use tokio::fs::File;
 
     use crate::{
-        internal::init_logger,
+        internal::{compare_files, init_logger},
         jpeg::{decode_structures, jpeg},
         CopyWithRawExif, ExtractRawExif,
     };
@@ -440,41 +434,5 @@ mod tests {
                 .await
                 .expect("Failed to compare files"));
         }
-    }
-
-    async fn compare_files(file1: &mut File, file2: &mut File) -> Result<bool> {
-        const BUFFER_SIZE: usize = 8192;
-
-        // seek to the beginning
-        file1.seek(SeekFrom::Start(0)).await?;
-        file2.seek(SeekFrom::Start(0)).await?;
-
-        // make reader
-        let mut reader1 = BufReader::new(file1);
-        let mut reader2 = BufReader::new(file2);
-
-        // make buffer
-        let mut buffer1 = vec![0; BUFFER_SIZE];
-        let mut buffer2 = vec![0; BUFFER_SIZE];
-
-        // compare by block
-        loop {
-            let bytes_read1 = reader1.read(&mut buffer1).await?;
-            let bytes_read2 = reader2.read(&mut buffer2).await?;
-
-            if bytes_read1 != bytes_read2 {
-                return Ok(false);
-            }
-
-            if bytes_read1 == 0 {
-                break; // EOF
-            }
-
-            if buffer1[..bytes_read1] != buffer2[..bytes_read1] {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
     }
 }

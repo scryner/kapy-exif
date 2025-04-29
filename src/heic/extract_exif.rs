@@ -30,7 +30,7 @@ impl ExtractRawExif for Heic {
         guard.seek(SeekFrom::Start(exif_ptr.offset + 4)).await?;
 
         // extract exif data
-        let mut exif_data = vec![0u8; exif_ptr.length];
+        let mut exif_data = vec![0u8; exif_ptr.length - 4];
         guard.read_exact(&mut exif_data).await.map_err(|e| {
             anyhow!(
                 "Failed to read exif (offset: {}, len: {}): {}",
@@ -40,7 +40,7 @@ impl ExtractRawExif for Heic {
             )
         })?;
 
-        // check exif data starts with "Exif"
+        // check exif data starts with "Exif\0\0"
         if &exif_data[0..6] != b"Exif\0\0" {
             return Err(anyhow!("Invalid exif data: not started with 'Exif'"));
         }

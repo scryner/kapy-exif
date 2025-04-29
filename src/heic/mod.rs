@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use log::debug;
 use tokio::{
     fs::File,
-    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite},
     sync::Mutex,
 };
 
@@ -62,67 +62,6 @@ impl Heic {
         Some((item_id, exif_ptr.clone()))
     }
 
-    async fn reconstruct(&self, mut w: impl AsyncWrite + Send + Sync + Unpin) -> Result<()> {
-        // write ftyp
-        self.copy_with_scoped_ptr(&mut w, &self.full_box.ftyp.full_ptr)
-            .await?;
-
-        // write meta
-        self.copy_with_scoped_ptr(&mut w, &self.full_box.meta.full_ptr)
-            .await?;
-
-        // write free
-        match &self.full_box.free {
-            Some(free) => self.copy_with_scoped_ptr(&mut w, &free.full_ptr).await?,
-            None => {
-                println!("free box is not found");
-            }
-        }
-
-        // traverse info box entries
-        let meta = &self.full_box.meta;
-        let iloc_box = meta.iloc_box.as_ref();
-
-        match iloc_box {
-            Some(iloc_box) => {
-                // write mdat header
-                let mdat_box = &self.full_box.media;
-                {
-                    // TODO: reconstruct with adjusted mdat box offset and its length
-                    let offset = mdat_box.full_ptr.offset;
-                    let length = (mdat_box.data_ptr.offset - offset) as usize;
-                    if length != 16 {
-                        return Err(anyhow!(
-                            "Invalid mdata size: must be 16, but got {}",
-                            length
-                        ));
-                    }
-
-                    self.copy_with_scoped(&mut w, offset, length).await?;
-                }
-
-                // write mdat content
-                for (_, iloc_entry) in iloc_box.entries.iter() {
-                    if iloc_entry.construction_method != 0 {
-                        continue;
-                    }
-
-                    for extent in iloc_entry.extents.iter() {
-                        let ptr = extent.ptr(iloc_entry);
-                        self.copy_with_scoped(&mut w, ptr.offset, ptr.length)
-                            .await?;
-                    }
-                }
-                Ok(())
-            }
-            None => {
-                // just write mdat
-                self.copy_with_scoped_ptr(&mut w, &self.full_box.media.full_ptr)
-                    .await
-            }
-        }
-    }
-
     async fn copy_with_scoped_ptr(
         &self,
         w: &mut (impl AsyncWrite + Send + Sync + Unpin),
@@ -150,54 +89,6 @@ impl Heic {
         // let mut pinned_writer = Box::pin(w);
         // tokio::io::copy(&mut scoped_reader, &mut pinned_writer).await?;
         tokio::io::copy(&mut scoped_reader, w).await?;
-
-        Ok(())
-    }
-
-    async fn write_mdat_with_replacing_item(
-        &self,
-        w: &mut (impl AsyncWrite + Send + Sync + Unpin),
-        extents: &Vec<ItemLocationPtr>,
-        replacing_item_id: u32,
-        replacing_data: &[u8],
-    ) -> Result<()> {
-        let mut item_found = 0;
-        let mut curr = extents.first().ok_or(anyhow!("no extents"))?.ptr.offset;
-
-        for extent in extents.iter() {
-            let extent_offset = extent.ptr.offset;
-            let extent_length = extent.ptr.length;
-
-            if extent_offset != curr {
-                if curr > extent_offset {
-                    return Err(anyhow!(
-                        "offset to be write is invalid: extent offset is lesser"
-                    ));
-                }
-
-                let to_zero_filled = vec![0u8; (extent_offset - curr) as usize];
-                w.write_all(&to_zero_filled).await?;
-            }
-
-            if extent.item_id == replacing_item_id {
-                if item_found > 0 {
-                    return Err(anyhow!(
-                        "replacing item id {} has multiple extents",
-                        replacing_item_id
-                    ));
-                }
-                item_found += 1;
-
-                // write replacing data
-                w.write_all(&replacing_data).await?;
-            } else {
-                // write from original file
-                self.copy_with_scoped(w, extent.ptr.offset, extent.ptr.length)
-                    .await?;
-            }
-
-            curr += extent_length as u64;
-        }
 
         Ok(())
     }
@@ -674,6 +565,7 @@ struct ItemLocationBox {
     pub(crate) data_ptr: Ptr,
 }
 
+#[derive(Clone, Debug)]
 struct ItemLocationPtr {
     pub(crate) item_id: u32,
     pub(crate) ptr: Ptr,
@@ -844,12 +736,8 @@ impl ItemLocationBox {
     where
         R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
     {
-        debug!("parsing iloc from {}", r.stream_position().await?);
-
         // read data
         let data = raw_box.data_ptr.read_data(r).await?;
-        debug!("iloc data length: {}", data.len());
-        debug!("iloc data: {}", hex::encode(&data));
 
         // read version and flags
         let (version, flags) = get_version_and_flags(&data)?;
@@ -890,7 +778,10 @@ impl ItemLocationBox {
             )
             .await?;
 
-            debug!("iloc entry: {:?}", entry);
+            debug!(
+                "iloc entry: item_id({}), extents({:?})",
+                entry.item_id, entry.extents,
+            );
 
             entries.insert(entry.item_id, entry);
         }
@@ -909,10 +800,7 @@ impl ItemLocationBox {
 mod tests {
     use tokio::fs;
 
-    use crate::{
-        heic::{heic, FullBox},
-        internal::init_logger,
-    };
+    use crate::{heic::FullBox, internal::init_logger};
 
     const SAMPLES: [&str; 2] = [
         "sample/sample_by_iphone15-pro-max.heic",
@@ -933,29 +821,6 @@ mod tests {
                 .expect("failed to read full box");
 
             println!("read full_box for '{}': n{:#?}", file, full_box);
-        }
-    }
-
-    #[tokio::test]
-    async fn reconstruct_heic() {
-        // init logger
-        init_logger();
-
-        // reconstruct heic from samples
-        for file in SAMPLES.into_iter() {
-            let heic = heic(file).await.expect("Failed to open file");
-
-            let mut buf = Vec::new();
-            heic.reconstruct(&mut buf)
-                .await
-                .expect("Failed to reconstruct heic");
-
-            println!("--------{} (content length: {})", file, buf.len());
-
-            // write to file
-            tokio::fs::write("./reconstructed.heic", &buf)
-                .await
-                .expect("Failed to write file");
         }
     }
 }

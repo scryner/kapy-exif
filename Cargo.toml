@@ -2,7 +2,12 @@
 name = "kapy-exif"
 version = "0.1.0"
 edition = "2021"
+authors = ["Seonghwan Jeong <scryner@gmail.com>"]
 build = "build.rs"
+description = "A minimal library that extracts and replaces EXIF for images"
+repository = "https://github.com/scryner/kapy-exif"
+keywords = ["heic", "jpeg", "exif", "isobmff"]
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

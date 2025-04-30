@@ -239,6 +239,7 @@ async fn overwrite_extent(
 ) -> Result<()> {
     // seek to offset to according item
     buf.seek(SeekFrom::Start(extent_val.position())).await?;
+    debug!("Seeked to position: {}", extent_val.position());
 
     // overwrite
     match extent_val {
@@ -261,7 +262,7 @@ async fn write_mdat<'a>(
     debug!(
         "orig mdata length: {} / write mdat length: {}",
         heic.full_box.media.full_ptr.length,
-        mdat_len + 12,
+        mdat_len + 16,
     );
 
     // write length (4 bytes with b0x01)
@@ -301,10 +302,12 @@ async fn write_mdat<'a>(
 
 #[cfg(test)]
 mod tests {
-    use tokio::fs::File;
+    use std::io::SeekFrom;
+
+    use tokio::{fs::File, io::AsyncSeekExt};
 
     use crate::{
-        heic,
+        heic::{heic, FullBox},
         internal::{compare_files, init_logger},
         CopyWithRawExif, ExtractRawExif,
     };
@@ -349,6 +352,69 @@ mod tests {
             assert!(compare_files(&mut orig, &mut tmp)
                 .await
                 .expect("Failed to compare files"));
+        }
+    }
+
+    #[tokio::test]
+    async fn copy_with_extended_exif_for_heic() {
+        // init logger
+        init_logger();
+
+        const APPENDING_ZEROS: usize = 1234;
+
+        // copy with exif (consequently, copy exactly the same file)
+        for file in SAMPLES.iter() {
+            // make tempfile
+            let tmp = tempfile::tempfile().expect("Failed to create tempfile");
+            let mut tmp = File::from_std(tmp);
+
+            // copy with exif
+            let (mdat_length, exif_length) = {
+                let heic = heic(file).await.expect("Failed to open file");
+                let expected_mdat_length = heic.full_box.media.full_ptr.length + APPENDING_ZEROS;
+
+                // extract exif_data
+                let mut exif_data = heic
+                    .extract()
+                    .await
+                    .expect("Failed to extract exif data")
+                    .expect("Exif not found");
+
+                // append some data into exif data: must be valid exif data
+                exif_data.extend_from_slice(&vec![0u8; 1234]);
+                let expected_exif_length = exif_data.len() + 10; // "\0\0\0\0X6" + "Exif\0\0" = 10 bytes
+
+                // copy with raw exif
+                heic.copy_with_raw_exif(&exif_data, &mut tmp)
+                    .await
+                    .expect("Failed to copy with raw exif");
+
+                (expected_mdat_length, expected_exif_length)
+            };
+
+            // seek file to 0
+            tmp.seek(SeekFrom::Start(0))
+                .await
+                .expect("failed to seek file");
+
+            // read full box
+            let full_box = FullBox::from_reader(&mut tmp)
+                .await
+                .expect("failed to decode full box");
+
+            // check mdat length
+            assert_eq!(mdat_length, full_box.media.full_ptr.length);
+
+            // retrieve exif length from meta
+            let retrieved_exif_length = {
+                let item = full_box.meta.get_item("Exif").expect("Exif not found");
+                assert_eq!(item.len(), 1);
+                let extent = &item[0].1;
+                extent.extent_length.value() as usize
+            };
+
+            // check exif length
+            assert_eq!(exif_length, retrieved_exif_length);
         }
     }
 }

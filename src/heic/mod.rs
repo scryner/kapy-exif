@@ -21,35 +21,39 @@ mod extract_exif;
 
 pub async fn heic(path: impl AsRef<Path>) -> Result<Heic> {
     // open file
-    let mut file = File::open(path.as_ref())
+    let file = File::open(path.as_ref())
         .await
         .map_err(|e| anyhow!("Failed to open file: {}", e))?;
 
-    let file_length = file.metadata().await?.len();
-
-    // decode full box
-    let full_box = FullBox::from_reader(&mut file).await?;
-
-    // seek start position for file
-    file.seek(SeekFrom::Start(0))
-        .await
-        .map_err(|e| anyhow!("Failed to seek: {}", e))?;
-
-    Ok(Heic {
-        file: Arc::new(Mutex::new(file)),
-        file_length,
-        full_box,
-    })
+    Heic::from_file(file).await
 }
 
 pub struct Heic {
     file: Arc<Mutex<File>>,
-    #[allow(unused)]
-    file_length: u64,
     full_box: FullBox,
 }
 
 impl Heic {
+    pub async fn from_file(mut file: File) -> Result<Self> {
+        // seek start position for file
+        file.seek(SeekFrom::Start(0))
+            .await
+            .map_err(|e| anyhow!("Failed to seek: {}", e))?;
+
+        // decode full box
+        let full_box = FullBox::from_reader(&mut file).await?;
+
+        // seek start position for file
+        file.seek(SeekFrom::Start(0))
+            .await
+            .map_err(|e| anyhow!("Failed to seek: {}", e))?;
+
+        Ok(Heic {
+            file: Arc::new(Mutex::new(file)),
+            full_box,
+        })
+    }
+
     fn exif_ptr(&self) -> Option<(u32, (Ptr, ItemLocationExtent))> {
         // get exif box id
         let item_id = self.full_box.meta.get_item_id("Exif")?;
@@ -209,7 +213,6 @@ impl RawBox {
     }
 }
 
-#[allow(unused)]
 #[derive(Debug)]
 struct FullBox {
     pub(crate) ftyp: FileTypeBox,    // ftyp
@@ -219,7 +222,7 @@ struct FullBox {
 }
 
 impl FullBox {
-    async fn from_reader<R>(r: &mut R) -> Result<Self>
+    pub(crate) async fn from_reader<R>(r: &mut R) -> Result<Self>
     where
         R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
     {
@@ -346,6 +349,7 @@ impl MetaBox {
     where
         R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
     {
+        let meta_full_box_offset = raw_box.full_ptr.offset;
         let data = raw_box.data_ptr.read_data(r).await?;
 
         // read version
@@ -373,7 +377,9 @@ impl MetaBox {
                     iinf_box = Some(iinf);
                 }
                 "iloc" => {
-                    let iloc = ItemLocationBox::from_raw_box(&raw_box, &mut cursor).await?;
+                    let iloc =
+                        ItemLocationBox::from_raw_box(&raw_box, &mut cursor, meta_full_box_offset)
+                            .await?;
                     iloc_box = Some(iloc);
                 }
                 _ => {
@@ -609,6 +615,7 @@ struct ItemLocationEntry {
 impl ItemLocationEntry {
     async fn from_cursor(
         r: &mut Cursor<&[u8]>,
+        origin_pos: u64,
         version: u8,
         offset_size: u8,
         length_size: u8,
@@ -651,7 +658,7 @@ impl ItemLocationEntry {
                 _ => return Err(anyhow!("Invalid index size: {}", index_size)),
             };
 
-            let current_pos = r.position();
+            let current_pos = origin_pos + r.position();
             let extent_offset = match offset_size {
                 1 => ExtentValue::U8(r.read_u8().await? as u64, current_pos),
                 2 => ExtentValue::U16(r.read_u16().await? as u64, current_pos),
@@ -660,7 +667,7 @@ impl ItemLocationEntry {
                 _ => return Err(anyhow!("Invalid offset size: {}", offset_size)),
             };
 
-            let current_pos = r.position();
+            let current_pos = origin_pos + r.position();
             let extent_length = match length_size {
                 1 => ExtentValue::U8(r.read_u8().await? as u64, current_pos),
                 2 => ExtentValue::U16(r.read_u16().await? as u64, current_pos),
@@ -733,10 +740,13 @@ impl ItemLocationExtent {
 }
 
 impl ItemLocationBox {
-    async fn from_raw_box<R>(raw_box: &RawBox, r: &mut R) -> Result<Self>
+    async fn from_raw_box<R>(raw_box: &RawBox, r: &mut R, meta_full_box_offset: u64) -> Result<Self>
     where
         R: AsyncRead + AsyncSeek + Send + Sync + Unpin,
     {
+        // get origin position to manipulate
+        let iloc_box_offset = raw_box.full_ptr.offset + meta_full_box_offset - 4; // 4 bytes will be consumed in below to make cursor
+
         // read data
         let data = raw_box.data_ptr.read_data(r).await?;
 
@@ -771,6 +781,7 @@ impl ItemLocationBox {
         for _ in 0..count {
             let entry = ItemLocationEntry::from_cursor(
                 &mut cursor,
+                iloc_box_offset,
                 version,
                 offset_size,
                 length_size,

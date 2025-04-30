@@ -102,8 +102,13 @@ impl Metadata {
 
 #[cfg(test)]
 mod tests {
+    use tokio::fs::File;
+
     use crate::{
-        exif::Metadata, heic, internal::init_logger, jpeg, CopyWithRawExif, ExtractRawExif,
+        exif::Metadata,
+        heic::{heic, Heic},
+        internal::init_logger,
+        jpeg, CopyWithRawExif, ExtractRawExif,
     };
 
     const SAMPLES: [&str; 3] = [
@@ -171,7 +176,7 @@ mod tests {
                 .get_tag("Exif.GPSInfo.GPSLatitude")
                 .expect("Failed to get GPS latitude");
 
-            assert_eq!(gps_lat, String::from("37/1 46/1 29640000/1000000"))
+            assert_eq!(gps_lat, String::from("37/1 46/1 29640000/1000000"));
         }
     }
 
@@ -206,13 +211,33 @@ mod tests {
         let dumped = metadata.dump().expect("Failed to dump metadata");
 
         // make a file
-        let mut out = tokio::fs::File::create("reconstructed.heic")
-            .await
-            .expect("Failed to create file");
+        let tmp = tempfile::NamedTempFile::new().expect("Failed to create temporary file");
+        let mut tmp = File::from_std(tmp.into_file());
 
+        // copy with injected gps
         image
-            .copy_with_raw_exif(&dumped, &mut out)
+            .copy_with_raw_exif(&dumped, &mut tmp)
             .await
             .expect("Failed to copy EXIF data");
+
+        // make HEIC struct from written
+        let gps_added = Heic::from_file(tmp)
+            .await
+            .expect("Failed to read HEIC file");
+
+        let gps_added_exif_data = gps_added
+            .extract()
+            .await
+            .expect("Failed to extract EXIF data")
+            .expect("No EXIF data found");
+
+        let gps_added_metadata =
+            Metadata::new_from_exif_blob(&gps_added_exif_data).expect("Failed to create metadata");
+
+        let gps_lat = gps_added_metadata
+            .get_tag("Exif.GPSInfo.GPSLatitude")
+            .expect("Failed to get GPS latitude");
+
+        assert_eq!(gps_lat, String::from("37/1 46/1 29640000/1000000"));
     }
 }

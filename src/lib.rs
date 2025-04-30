@@ -1,10 +1,28 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+// pub mod exif;
+pub mod exif;
 mod heic;
+mod internal;
+mod jpeg;
+mod scoped_reader;
+
+pub use heic::heic;
+pub use jpeg::jpeg;
+
+use tokio::io::AsyncWrite;
 
 #[async_trait]
-pub trait ManipulateRawExif {
-    async fn extract(&self) -> Result<Vec<u8>>;
-    async fn replace(&mut self, data: &[u8]) -> Result<()>;
+pub trait ExtractRawExif {
+    async fn extract(&self) -> Result<Option<Vec<u8>>>;
+}
+
+#[async_trait]
+pub trait CopyWithRawExif {
+    async fn copy_with_raw_exif(
+        &self,
+        exif: &[u8],
+        writer: impl AsyncWrite + Send + Sync + Unpin,
+    ) -> Result<()>;
 }

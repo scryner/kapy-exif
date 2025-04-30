@@ -2,11 +2,30 @@
 name = "kapy-exif"
 version = "0.1.0"
 edition = "2021"
+authors = ["Seonghwan Jeong <scryner@gmail.com>"]
+build = "build.rs"
+description = "A minimal library that extracts and replaces EXIF for images"
+repository = "https://github.com/scryner/kapy-exif"
+keywords = ["heic", "jpeg", "exif", "isobmff"]
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.79"
-async-trait = "0.1.77"
+anyhow = "1.0.98"
+async-trait = "0.1.88"
+indexmap = "2.9.0"
+log = "0.4.27"
+pin-project = "1.1.10"
+pkg-config = "0.3.32"
+rand = "0.9.1"
+tokio = { version = "1.44.2", features = ["full"] }
+
+[dev-dependencies]
+env_logger = "0.11.8"
+tempfile = "3.19.1"
 hex = "0.4.3"
-tokio = { version = "1.36.0", features = ["full"] }
+
+[build-dependencies]
+cc = "1.2.20"
+pkg-config = "0.3.32"

@@ -8,6 +8,7 @@ description = "A minimal library that extracts and replaces EXIF for images"
 repository = "https://github.com/scryner/kapy-exif"
 keywords = ["heic", "jpeg", "exif", "isobmff"]
 license = "MIT"
+exclude = ["sample/*"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

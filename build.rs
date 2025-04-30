@@ -21,34 +21,6 @@ fn main() {
     )
     .unwrap();
 
-    // find libssh
-    let libssh_inc_dirs = find_library(
-        FromPkgConfig {
-            name: "libssh".to_string(),
-            atleast_version: "0.10.4".to_string(),
-        },
-        FromEnv {
-            env_key_include_dirs: "LIBSSH_INCLUDE_DIRS".to_string(),
-            env_key_lib_dirs: "LIBSSH_LIB_DIRS".to_string(),
-            libs: vec!["ssh".to_string()],
-        },
-    )
-    .unwrap();
-
-    // find libheif
-    find_library(
-        FromPkgConfig {
-            name: "libheif".to_string(),
-            atleast_version: "1.15.2".to_string(),
-        },
-        FromEnv {
-            env_key_include_dirs: "LIBHEIF_INCLUDE_DIRS".to_string(),
-            env_key_lib_dirs: "LIBHEIF_LIB_DIRS".to_string(),
-            libs: vec!["heif".to_string()],
-        },
-    )
-    .unwrap();
-
     // compile c files
     cc::Build::new()
         .cpp(true)
@@ -56,7 +28,6 @@ fn main() {
         .file("lib/exif.cpp")
         .include("lib")
         .includes(exiv2_inc_dirs)
-        .includes(libssh_inc_dirs)
         .compile("libexif");
 
     println!("cargo:rerun-if-changed=lib/exif.h");

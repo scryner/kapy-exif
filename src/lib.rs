@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 // pub mod exif;
-mod exif;
+pub mod exif;
 mod heic;
 mod internal;
 mod jpeg;

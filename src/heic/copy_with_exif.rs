@@ -41,11 +41,7 @@ impl CopyWithRawExif for Heic {
            - If the size of the given EXIF data is smaller than the existing EXIF data, overwrite the existing EXIF data.
            - In this case, the remaining space will be filled with garbage values, but it is expected to be harmless.
 
-        2. Use free space
-           - If a free box exists, utilize it.
-           - Adjust the starting position of the mdat box to be inside the free box to store the added data.
-
-        3. Extend mdat box
+        2. Extend mdat box
            - Adjust the size of the mdat box to accommodate the increased size of the EXIF data.
         */
 
@@ -57,14 +53,9 @@ impl CopyWithRawExif for Heic {
             v
         };
 
-        // get several lengths
+        // get metadata related information
         let exif_len = exif.len();
-        let free_len = {
-            match &self.full_box.free {
-                Some(free) => free.full_ptr.length,
-                None => 0,
-            }
-        };
+
         let exif_item_id = self
             .full_box
             .meta
@@ -97,11 +88,6 @@ impl CopyWithRawExif for Heic {
             if i != 0 {
                 let prev_item = sorted_extents.get(i - 1).unwrap();
                 let expected_offset = prev_item.ptr.offset + prev_item.ptr.length as u64;
-
-                debug!(
-                    "--- expected_offset: {} / actual_offset: {}",
-                    expected_offset, item.ptr.offset
-                );
 
                 if expected_offset > item.ptr.offset {
                     return Err(anyhow!(

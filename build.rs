@@ -1,39 +1,44 @@
 use std::env;
 use std::path::PathBuf;
 
+#[allow(dead_code)]
 const PATH_SEPARATOR: &str = match cfg!(target_os = "windows") {
     true => ";",
     _ => ":",
 };
 
 fn main() {
-    // find exiv2
-    let exiv2_inc_dirs = find_library(
-        FromPkgConfig {
-            name: "exiv2".to_string(),
-            atleast_version: "0.27.6".to_string(),
-        },
-        FromEnv {
-            env_key_include_dirs: "EXIV2_INCLUDE_DIRS".to_string(),
-            env_key_lib_dirs: "EXIV2_LIB_DIRS".to_string(),
-            libs: vec!["exiv2".to_string()],
-        },
-    )
-    .unwrap();
+    #[cfg(feature = "exiv2")]
+    {
+        // find exiv2
+        let exiv2_inc_dirs = find_library(
+            FromPkgConfig {
+                name: "exiv2".to_string(),
+                atleast_version: "0.27.6".to_string(),
+            },
+            FromEnv {
+                env_key_include_dirs: "EXIV2_INCLUDE_DIRS".to_string(),
+                env_key_lib_dirs: "EXIV2_LIB_DIRS".to_string(),
+                libs: vec!["exiv2".to_string()],
+            },
+        )
+        .unwrap();
 
-    // compile c files
-    cc::Build::new()
-        .cpp(true)
-        .flag("-std=c++17")
-        .file("lib/exif.cpp")
-        .include("lib")
-        .includes(exiv2_inc_dirs)
-        .compile("libexif");
+        // compile c files
+        cc::Build::new()
+            .cpp(true)
+            .flag("-std=c++17")
+            .file("lib/exif.cpp")
+            .include("lib")
+            .includes(exiv2_inc_dirs)
+            .compile("libexif");
 
-    println!("cargo:rerun-if-changed=lib/exif.h");
-    println!("cargo:rerun-if-changed=lib/exif.cpp");
+        println!("cargo:rerun-if-changed=lib/exif.h");
+        println!("cargo:rerun-if-changed=lib/exif.cpp");
+    }
 }
 
+#[allow(dead_code)]
 struct FromPkgConfig {
     name: String,
 
@@ -41,12 +46,14 @@ struct FromPkgConfig {
     atleast_version: String,
 }
 
+#[allow(dead_code)]
 struct FromEnv {
     env_key_include_dirs: String,
     env_key_lib_dirs: String,
     libs: Vec<String>,
 }
 
+#[allow(dead_code)]
 fn find_library(from_pkg_config: FromPkgConfig, from_env: FromEnv) -> Result<Vec<PathBuf>, String> {
     // try to find from env
     match find_library_from_env(&from_env) {

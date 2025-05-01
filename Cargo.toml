@@ -1,6 +1,6 @@
 [package]
 name = "kapy-exif"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Seonghwan Jeong <scryner@gmail.com>"]
 build = "build.rs"
@@ -30,3 +30,8 @@ hex = "0.4.3"
 [build-dependencies]
 cc = "1.2.20"
 pkg-config = "0.3.32"
+
+[features]
+default = []
+exiv2 = []
+full = ["exiv2"]

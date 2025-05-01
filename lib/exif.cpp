@@ -25,9 +25,8 @@ struct _exif_metadata_private_t
 
 // internal functions
 char *s_to_cstr(std::string &str);
-// int s_try_destroy_gps_info(exif_metadata_t *self);
-// int s_try_update_gps_info(exif_metadata_t *self, double lat, double lon, double alt);
 
+// make exif_metadata_t
 exif_metadata_t *exif_metadata_new()
 {
     exif_metadata_t *self = new exif_metadata_t();
@@ -36,6 +35,7 @@ exif_metadata_t *exif_metadata_new()
     return self;
 }
 
+// decode exif metadata from blob (blob starts after "Exif\0\0")
 int exif_metadata_from_blob(exif_metadata_t *self, const unsigned char *blob, size_t blob_len)
 {
     try
@@ -57,6 +57,7 @@ int exif_metadata_from_blob(exif_metadata_t *self, const unsigned char *blob, si
     return 0;
 }
 
+// encode exif metadata to blob (blob hasn't "Exif\0\0" at beginning)
 size_t exif_metadata_to_blob(exif_metadata_t *self, unsigned char **out_blob)
 {
     size_t out_blob_len = 0;
@@ -80,6 +81,7 @@ size_t exif_metadata_to_blob(exif_metadata_t *self, unsigned char **out_blob)
     return out_blob_len;
 }
 
+// get value for given tag
 char *exif_get_tag_string(exif_metadata_t *self, const char *tag)
 {
     if (self == nullptr || self->priv == nullptr)
@@ -113,6 +115,7 @@ char *exif_get_tag_string(exif_metadata_t *self, const char *tag)
     return nullptr;
 }
 
+// destroy exif metadata
 void exif_metadata_destroy(exif_metadata_t **self)
 {
     if (self == nullptr || *self == nullptr || (*self)->priv == nullptr)
@@ -125,6 +128,7 @@ void exif_metadata_destroy(exif_metadata_t **self)
     *self = nullptr;
 }
 
+// internal function to convert string to c-string
 char *s_to_cstr(std::string &str)
 {
     char *ret = new char[str.length() + 1];
@@ -133,6 +137,7 @@ char *s_to_cstr(std::string &str)
     return ret;
 }
 
+// add GPS information to exif metadata
 int exif_metadata_add_gps_info(exif_metadata_t *self, double lat, double lon, double alt)
 {
     try

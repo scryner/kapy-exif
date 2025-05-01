@@ -1,4 +1,6 @@
+#[allow(unused)]
 use std::env;
+#[allow(unused)]
 use std::path::PathBuf;
 
 #[allow(dead_code)]
@@ -53,7 +55,7 @@ struct FromEnv {
     libs: Vec<String>,
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "exiv2")]
 fn find_library(from_pkg_config: FromPkgConfig, from_env: FromEnv) -> Result<Vec<PathBuf>, String> {
     // try to find from env
     match find_library_from_env(&from_env) {
@@ -65,7 +67,7 @@ fn find_library(from_pkg_config: FromPkgConfig, from_env: FromEnv) -> Result<Vec
     find_library_internal(&from_pkg_config)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), feature = "exiv2"))]
 fn find_library_internal(from_pkg_config: &FromPkgConfig) -> Result<Vec<PathBuf>, String> {
     let name = from_pkg_config.name.as_str();
 
@@ -77,7 +79,7 @@ fn find_library_internal(from_pkg_config: &FromPkgConfig) -> Result<Vec<PathBuf>
     Ok(library.include_paths)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "exiv2"))]
 fn find_library_internal(from_pkg_config: &FromPkgConfig) -> Result<Vec<PathBuf>, String> {
     let name = from_pkg_config.name.as_str();
 
@@ -87,6 +89,7 @@ fn find_library_internal(from_pkg_config: &FromPkgConfig) -> Result<Vec<PathBuf>
     Ok(library.include_paths)
 }
 
+#[cfg(feature = "exiv2")]
 fn find_library_from_env(from_env: &FromEnv) -> Result<Vec<PathBuf>, String> {
     let include_dirs = verify_directories_from_env(from_env.env_key_include_dirs.as_str())?;
     for dir in include_dirs.iter() {
@@ -105,6 +108,7 @@ fn find_library_from_env(from_env: &FromEnv) -> Result<Vec<PathBuf>, String> {
     Ok(include_dirs)
 }
 
+#[cfg(feature = "exiv2")]
 fn verify_directories_from_env(env_key: &str) -> Result<Vec<PathBuf>, String> {
     println!("cargo:rerun-if-env-changed={}", env_key);
 

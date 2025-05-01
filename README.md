@@ -6,9 +6,16 @@ This is a simple library that extracts and replaces EXIF data in an image file. 
 The functionalities this library focuses on are as follows:
 
 - Extracting raw EXIF data from an image (currently, JPEG and HEIC images are supported)
-- Adding or replacing raw EXIF data for an image
+- Adding or replacing raw EXIF data for an image (with 'exiv2' feature)
 
 ## Build
+
+This section describes how to build the crate with 'exiv2' feature.
+This feature is required to manipulate(get tag, update GPS info) EXIF data.
+
+If you don't need to manipulate EXIF data, you can build the crate without the 'exiv2' feature.
+In this case, you do not need to follow the instructions below.
+
 ### Build on macOS
 
 If you use Homebrew (https://brew.sh/), you can easily install the required packages. <br/>
@@ -16,7 +23,7 @@ After installing Homebrew, you can install the required packages and build the a
 
 ```shell
 $ brew install pkg-config exiv2
-$ cargo build
+$ cargo build --features=exiv2
 ```
 
 If you are not using Homebrew, please install the required packages below and set the corresponding environment variables accordingly:
@@ -43,5 +50,5 @@ If you are not using Homebrew, please install the required packages below and se
 > set EXIV2_INCLUDE_DIRS={YOUR_EXIV2_INCLUDE_DIR}
 > set EXIV2_LIB_DIRS={YOUR_EXIV_LIB_DIR}
 > set LIBCLANG_PATH={YOUR_LLVM_BIN_DIR}
-> cargo build
+> cargo build --features=exiv2
 ```

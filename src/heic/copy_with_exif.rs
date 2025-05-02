@@ -307,7 +307,7 @@ mod tests {
     use tokio::{fs::File, io::AsyncSeekExt};
 
     use crate::{
-        heic::{heic, FullBox},
+        heic::{heic, FullBox, Heic},
         internal::{compare_files, init_logger},
         CopyWithRawExif, ExtractRawExif,
     };
@@ -370,7 +370,9 @@ mod tests {
 
             // copy with exif
             let (mdat_length, exif_length) = {
-                let heic = heic(file).await.expect("Failed to open file");
+                let heic = Heic::from_file_path(file)
+                    .await
+                    .expect("Failed to open file");
                 let expected_mdat_length = heic.full_box.media.full_ptr.length + APPENDING_ZEROS;
 
                 // extract exif_data

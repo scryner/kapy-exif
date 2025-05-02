@@ -14,18 +14,13 @@ use tokio::{
     sync::Mutex,
 };
 
-use crate::scoped_reader::ScopedReader;
+use crate::{scoped_reader::ScopedReader, CopyWithRawExif, ExtractRawExif};
 
 mod copy_with_exif;
 mod extract_exif;
 
-pub async fn heic(path: impl AsRef<Path>) -> Result<Heic> {
-    // open file
-    let file = File::open(path.as_ref())
-        .await
-        .map_err(|e| anyhow!("Failed to open file: {}", e))?;
-
-    Heic::from_file(file).await
+pub async fn heic(file_path: impl AsRef<Path>) -> Result<impl ExtractRawExif + CopyWithRawExif> {
+    Heic::from_file_path(file_path).await
 }
 
 pub struct Heic {
@@ -34,6 +29,15 @@ pub struct Heic {
 }
 
 impl Heic {
+    pub async fn from_file_path(file_path: impl AsRef<Path>) -> Result<Self> {
+        // open file
+        let file = File::open(file_path.as_ref())
+            .await
+            .map_err(|e| anyhow!("Failed to open file: {}", e))?;
+
+        Heic::from_file(file).await
+    }
+
     pub async fn from_file(mut file: File) -> Result<Self> {
         // seek start position for file
         file.seek(SeekFrom::Start(0))

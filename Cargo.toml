@@ -1,6 +1,6 @@
 [package]
 name = "kapy-exif"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 authors = ["Seonghwan Jeong <scryner@gmail.com>"]
 build = "build.rs"

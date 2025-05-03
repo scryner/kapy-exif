@@ -26,6 +26,11 @@ extern "C" {
         lon: f64,
         alt: f64,
     ) -> c_int;
+    fn exif_get_last_error() -> *const c_char;
+    fn exif_clear_last_error();
+
+    #[allow(unused)] // only used for testing
+    fn exif_test_error_handling(expected: *const c_char) -> c_int;
 }
 
 // safe implementation
@@ -49,14 +54,16 @@ impl Metadata {
             let blob_ptr = blob.as_ptr();
 
             if exif_metadata_from_blob(raw, blob_ptr, blob_len) != 0 {
-                return Err(anyhow!("Failed to create metadata from image blob"));
+                let err_msg = get_last_error()
+                    .unwrap_or_else(|| "Unknown error creating metata from blob".to_string());
+                return Err(anyhow!(err_msg));
             }
 
             Ok(Metadata { raw })
         }
     }
 
-    pub fn get_tag<T>(&self, tag: T) -> Option<String>
+    pub fn get_tag<T>(&self, tag: T) -> Result<Option<String>>
     where
         T: AsRef<str>,
     {
@@ -66,13 +73,16 @@ impl Metadata {
         unsafe {
             let val = exif_get_tag_string(self.raw, tag);
             if val.is_null() {
-                return None;
+                match get_last_error() {
+                    Some(err_msg) => return Err(anyhow!(err_msg)),
+                    None => return Ok(None),
+                }
             }
 
             let val = CStr::from_ptr(val as *const c_char);
             let val = val.to_str().unwrap().to_string();
 
-            Some(val)
+            Ok(Some(val))
         }
     }
 
@@ -82,7 +92,10 @@ impl Metadata {
             let blob_len = exif_metadata_to_blob(self.raw, &mut blob);
 
             if blob.is_null() || blob_len <= 0 {
-                return Err(anyhow!("Failed to dump metadata to blob"));
+                let err_msg = get_last_error()
+                    .unwrap_or_else(|| "Unknown error dumping metadata to blob".to_string());
+
+                return Err(anyhow!(err_msg));
             }
 
             Ok(Vec::from_raw_parts(blob, blob_len, blob_len))
@@ -92,11 +105,58 @@ impl Metadata {
     pub fn update_gps_info(&mut self, lat: f64, lon: f64, alt: f64) -> Result<()> {
         unsafe {
             if exif_metadata_add_gps_info(self.raw, lat, lon, alt) != 0 {
-                return Err(anyhow!("Failed to update GPS info"));
+                let err_msg = get_last_error()
+                    .unwrap_or_else(|| "Unknown error updating GPS info".to_string());
+
+                return Err(anyhow!(err_msg));
             }
         }
 
         Ok(())
+    }
+}
+
+// helper function to get last error message
+fn get_last_error() -> Option<String> {
+    unsafe {
+        let error_ptr = exif_get_last_error();
+        if error_ptr.is_null() {
+            return None;
+        }
+
+        let c_str = CStr::from_ptr(error_ptr);
+        match c_str.to_str() {
+            Ok(s) => {
+                let res = s.to_string();
+
+                // clear error message
+                exif_clear_last_error();
+
+                // return error message
+                Some(res)
+            }
+            Err(_) => Some("Invalid error message encoding".to_string()),
+        }
+    }
+}
+
+// helper function to test error handling
+#[allow(unused)]
+#[cfg(test)]
+fn test_error_handling(expected: impl AsRef<str>) -> Result<String> {
+    let expected = CString::new(expected.as_ref()).unwrap();
+    let expected = expected.as_ptr();
+
+    unsafe {
+        let res = exif_test_error_handling(expected);
+        if res < 0 {
+            match get_last_error() {
+                Some(err_msg) => Ok(err_msg),
+                None => Err(anyhow!("Error message not found")),
+            }
+        } else {
+            Err(anyhow!("Unexpected success"))
+        }
     }
 }
 
@@ -105,6 +165,7 @@ mod tests {
     use tokio::fs::File;
 
     use crate::{
+        exif::test_error_handling,
         exif::Metadata,
         heic::{heic, Heic},
         internal::init_logger,
@@ -149,7 +210,8 @@ mod tests {
 
             let camera_model = metadata
                 .get_tag("Exif.Image.Model")
-                .expect("Failed to get tag");
+                .expect("Failed to get tag")
+                .expect("Must have the metadata");
 
             println!("Camera Model: {}", camera_model);
 
@@ -158,7 +220,8 @@ mod tests {
             let dumped_camera_model = Metadata::new_from_exif_blob(&dumped)
                 .expect("Failed to create metadata")
                 .get_tag("Exif.Image.Model")
-                .expect("Failed to get tag");
+                .expect("Failed to get tag")
+                .expect("Must have the metadata");
 
             assert_eq!(camera_model, dumped_camera_model);
 
@@ -174,7 +237,8 @@ mod tests {
             // get updated GPS info
             let gps_lat = metadata
                 .get_tag("Exif.GPSInfo.GPSLatitude")
-                .expect("Failed to get GPS latitude");
+                .expect("Failed to get GPS latitude")
+                .expect("Must have the metadata");
 
             assert_eq!(gps_lat, String::from("37/1 46/1 29640000/1000000"));
         }
@@ -236,8 +300,19 @@ mod tests {
 
         let gps_lat = gps_added_metadata
             .get_tag("Exif.GPSInfo.GPSLatitude")
-            .expect("Failed to get GPS latitude");
+            .expect("Failed to get GPS latitude")
+            .expect("Must have the metadata");
 
         assert_eq!(gps_lat, String::from("37/1 46/1 29640000/1000000"));
+    }
+
+    #[test]
+    fn error_handling() {
+        let expected = vec!["Test Messsage 1", "Test Message 2"];
+
+        for msg in expected.iter() {
+            let res = test_error_handling(msg).expect("Failed to handle error");
+            assert_eq!(res, msg.to_string());
+        }
     }
 }

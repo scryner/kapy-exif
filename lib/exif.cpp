@@ -16,6 +16,12 @@
 #define EXIF_KEY_GPS_LON_REF "Exif.GPSInfo.GPSLongitudeRef"
 #define EXIF_KEY_GPS_LON "Exif.GPSInfo.GPSLongitude"
 
+// global error message buffer
+static char g_error_message[1024] = {0};
+
+// prototype of set error message function
+void s_set_error_message(const char* format, ...);
+
 // private struct for exif_metadata_t
 struct _exif_metadata_private_t
 {
@@ -50,7 +56,7 @@ int exif_metadata_from_blob(exif_metadata_t *self, const unsigned char *blob, si
     }
     catch (Exiv2::Error &e)
     {
-        std::cerr << "Failed to read exif from blob: " << e << std::endl;
+        s_set_error_message("Failed to read exif from blob: %s", e.what());
         return -1;
     }
 
@@ -74,7 +80,7 @@ size_t exif_metadata_to_blob(exif_metadata_t *self, unsigned char **out_blob)
     }
     catch (Exiv2::Error &e)
     {
-        std::cerr << "Failed to write exif to blob: " << e << std::endl;
+        s_set_error_message("Failed to write exif to blob: %s", e.what());
         return -1;
     }
 
@@ -103,12 +109,16 @@ char *exif_get_tag_string(exif_metadata_t *self, const char *tag)
         }
         else
         {
-            std::cerr << "Failed to find tag: " << tag << std::endl;
+            // make sure the error message was cleared
+            exif_clear_last_error();
+
+            // not found
             return nullptr;
         }
     }
-    catch (...)
+    catch (Exiv2::Error &e)
     {
+        s_set_error_message("Failed to find tag '%s': %s", tag, e.what());
         return nullptr;
     }
 
@@ -213,9 +223,44 @@ int exif_metadata_add_gps_info(exif_metadata_t *self, double lat, double lon, do
     }
     catch (Exiv2::Error &e)
     {
-        std::cerr << "Failed to add gps info in exif: " << e << std::endl;
+
+        s_set_error_message("Failed to add gps info in exif: %s", e.what());
         return -1;
     }
 
+    return 0;
+}
+
+
+// set error message to global error message buffer
+void s_set_error_message(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    vsnprintf(g_error_message, sizeof(g_error_message), format, args);
+    va_end(args);
+}
+
+// get error message from global error message buffer
+const char* exif_get_last_error() {
+    if (g_error_message[0] == '\0') {
+        return nullptr;
+    }
+    return g_error_message;
+}
+
+// clear error message from global error message buffer
+void exif_clear_last_error() {
+    g_error_message[0] = '\0';
+}
+
+// Helper function to test error handling
+int exif_test_error_handling(const char *expected) {
+    try {
+        throw Exiv2::Error(Exiv2::ErrorCode::kerErrorMessage, expected);
+    }
+    catch (Exiv2::Error &e) {
+        s_set_error_message("%s", e.what());
+        return -1;
+    }
     return 0;
 }

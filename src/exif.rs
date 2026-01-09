@@ -172,10 +172,11 @@ mod tests {
         jpeg, CopyWithRawExif, ExtractRawExif,
     };
 
-    const SAMPLES: [&str; 3] = [
+    const SAMPLES: [&str; 4] = [
         "sample/sample_by_pentax-k1.jpg",
         "sample/sample_by_iphone15-pro-max.heic",
         "sample/sample_by_hasselblad-x2d.heic",
+        "sample/sample_by_hasselblad-x2d.jpg",
     ];
 
     #[tokio::test]

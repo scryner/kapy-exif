@@ -82,6 +82,7 @@ markers!(
     (SOS, 0xffda, false),
     (DQT, 0xffdb, true),
     (DRI, 0xffdd, true),
+    (APP0, 0xffe0, true),
     (APP1, 0xffe1, true),
     (APP2, 0xffe2, true),
     (APP3, 0xffe3, true),
@@ -130,7 +131,7 @@ impl ExtractRawExif for Jpeg {
 
         // extract exif
         match extract_exif(&mut *guard, &self.structures).await? {
-            Some((_, exif)) => Ok(Some(exif)),
+            Some((_, _, exif)) => Ok(Some(exif)),
             None => Ok(None),
         }
     }
@@ -148,11 +149,11 @@ impl CopyWithRawExif for Jpeg {
 
         // extract exif data
         let prev_exif = extract_exif(&mut *reader, &self.structures).await?;
-        let (prev_exif_marker, _) = prev_exif.ok_or_else(|| anyhow!("Exif data not found"))?;
+        let (exif_index, _, _) = prev_exif.ok_or_else(|| anyhow!("Exif data not found"))?;
 
         // write markers
-        for (marker, payload) in self.structures.iter() {
-            if *marker == prev_exif_marker {
+        for (i, (marker, payload)) in self.structures.iter().enumerate() {
+            if i == exif_index {
                 // write marker
                 writer.write_u16(marker.value()).await?;
 
@@ -302,12 +303,12 @@ where
 async fn extract_exif<R>(
     r: &mut R,
     structures: &Vec<(Marker, Payload)>,
-) -> Result<Option<(Marker, Vec<u8>)>>
+) -> Result<Option<(usize, Marker, Vec<u8>)>>
 where
     R: AsyncSeek + AsyncRead + Send + Sync + Unpin,
 {
     // traverse structures to find APP1 marker
-    for (marker, payload) in structures.iter() {
+    for (i, (marker, payload)) in structures.iter().enumerate() {
         if marker.is_app_segment() {
             match *payload {
                 Payload::Content(offset, length) => {
@@ -334,7 +335,7 @@ where
                     r.read_exact(&mut buf[..]).await?;
 
                     // we got exif, return it
-                    return Ok(Some((*marker, buf)));
+                    return Ok(Some((i, *marker, buf)));
                 }
                 Payload::NoContent(_) => {
                     return Err(anyhow!("Invalid payload for APP segment: {:?}", marker));
@@ -356,7 +357,10 @@ mod tests {
         CopyWithRawExif, ExtractRawExif,
     };
 
-    const SAMPLES: [&str; 1] = ["sample/sample_by_pentax-k1.jpg"];
+    const SAMPLES: [&str; 2] = [
+        "sample/sample_by_pentax-k1.jpg",
+        "sample/sample_by_hasselblad-x2d.jpg",
+    ];
 
     #[tokio::test]
     async fn decode_jpeg_structures() {
@@ -430,9 +434,11 @@ mod tests {
             let mut orig = File::open(file).await.expect("Failed to open file");
 
             // compare the original file and the copied file
-            assert!(compare_files(&mut orig, &mut tmp)
+            let same_as = compare_files(&mut orig, &mut tmp)
                 .await
-                .expect("Failed to compare files"));
+                .expect("Failed to compare files");
+
+            assert!(same_as);
         }
     }
 }
